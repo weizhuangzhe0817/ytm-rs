@@ -4,6 +4,7 @@ nav-explore = 둘러보기
 nav-library = 보관함
 nav-library-section = 보관함 › { $tab }
 nav-playlists = 재생목록
+nav-community-playlists = 커뮤니티 재생목록
 nav-liked-songs = 좋아요 표시한 노래
 nav-albums = 앨범
 nav-artists = 아티스트
@@ -24,6 +25,15 @@ nav-refresh-shortcut = 새로고침(F5)
 nav-search-music = 노래, 앨범, 아티스트 검색
 nav-search-podcasts = 노래, 앨범, 아티스트, 팟캐스트 검색
 nav-clear-search = 검색 지우기
+
+# A YouTube Music or YouTube link pasted into the search box.
+link-open = 링크 열기
+link-not-found = 그 링크에서 아무것도 찾지 못했습니다
+link-play-song = 이 곡 재생
+link-open-album = 이 앨범 열기
+link-open-playlist = 이 재생목록 열기
+link-open-artist = 이 아티스트 열기
+link-queue-hint = Shift+Enter로 대기열에 추가
 nav-remove-recent-search = 최근 검색에서 삭제
 nav-new-releases-for-you = 당신을 위한 새로운 릴리스
 nav-new-releases = 인기 있는 신작

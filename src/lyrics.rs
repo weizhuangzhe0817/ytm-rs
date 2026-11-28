@@ -111,6 +111,10 @@ impl Provider {
         }
     }
 
+    pub fn is_unison(self) -> bool {
+        matches!(self, Provider::UnisonRich | Provider::UnisonWord | Provider::UnisonSynced | Provider::UnisonPlain)
+    }
+
     pub fn sync(self) -> SyncKind {
         match self {
             Provider::BLyricsRich | Provider::UnisonRich | Provider::BinimumRich => SyncKind::Syllable,
@@ -144,7 +148,7 @@ pub struct Part {
     pub bg: bool,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Line {
     pub start: i32,
     pub dur: i32,
@@ -176,6 +180,27 @@ pub struct Lyrics {
     /// Language the source says the lyrics are in.
     pub language: Option<String>,
     pub songwriters: Vec<String>,
+    /// Unison's credit: its song page and who submitted the lyrics.
+    #[serde(default)]
+    pub unison: Option<UnisonCredit>,
+}
+
+/// Unison asks every app to credit it and the lyrics' submitter, both linked.
+#[derive(Clone, Debug, PartialEq, Hash, Serialize, Deserialize)]
+pub struct UnisonCredit {
+    pub video_id: String,
+    /// `submitter.displayName` and `submitter.keyId`.
+    pub submitter: Option<(String, String)>,
+}
+
+impl UnisonCredit {
+    pub fn song_url(&self) -> String {
+        format!("https://unison.betterlyrics.org/song/{}", self.video_id)
+    }
+
+    pub fn submitter_url(key_id: &str) -> String {
+        format!("https://unison.betterlyrics.org/curator/{key_id}")
+    }
 }
 
 impl Lyrics {
@@ -184,7 +209,7 @@ impl Lyrics {
             return None;
         }
         let sync = derive_sync(&lines);
-        Some(Self { lines, sync, provider, language, songwriters })
+        Some(Self { lines, sync, provider, language, songwriters, unison: None })
     }
 }
 
@@ -208,6 +233,14 @@ pub struct LyricsSet {
 impl LyricsSet {
     pub fn get(&self, p: Provider) -> Option<&Lyrics> {
         self.sources.iter().find(|l| l.provider == p)
+    }
+
+    /// Unison lyrics saved before they carried its credit get one crediting Unison alone,
+    /// linked to `video_id`'s page there: who submitted them comes with the next fresh look.
+    pub fn credit_unison(&mut self, video_id: &str) {
+        for l in self.sources.iter_mut().filter(|l| l.provider.is_unison() && l.unison.is_none()) {
+            l.unison = Some(UnisonCredit { video_id: video_id.to_owned(), submitter: None });
+        }
     }
 }
 
@@ -392,7 +425,7 @@ impl Client {
             return Ok(vec![]);
         }
         let v: Value = resp.error_for_status()?.json().await?;
-        Ok(from_unison(&v["data"], q.duration.unwrap_or(0) as i32 * 1000))
+        Ok(from_unison(&v["data"], q.video_id, q.duration.unwrap_or(0) as i32 * 1000))
     }
 
     /// LRCLib's best match by bare title and first artist: within 3 s of the song's length
@@ -433,17 +466,23 @@ impl Client {
                 return Err(e);
             }
         };
-        let resp: Value = self
-            .http
-            .post(format!("{API}verify-turnstile"))
-            .json(&serde_json::json!({ "token": turnstile }))
-            .timeout(Duration::from_secs(15))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        let jwt = resp["jwt"].as_str().ok_or_else(|| anyhow::anyhow!("no JWT in response"))?.to_owned();
+        // A failed token exchange is a failed challenge like any webview error; without
+        // stamping the backoff here, every song re-ran the whole popup.
+        let jwt = async {
+            let resp: Value = self
+                .http
+                .post(format!("{API}verify-turnstile"))
+                .json(&serde_json::json!({ "token": turnstile }))
+                .timeout(Duration::from_secs(15))
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            anyhow::Ok(resp["jwt"].as_str().ok_or_else(|| anyhow::anyhow!("no JWT in response"))?.to_owned())
+        }
+        .await
+        .inspect_err(|_| *self.challenge_failed.lock().unwrap() = Some(std::time::Instant::now()))?;
         let _ = std::fs::write(&self.jwt_file, &jwt);
         log::info!("lyrics: new access token ({}h)", jwt_seconds_left(&jwt) / 3600);
         *slot = Some(jwt.clone());
@@ -580,7 +619,7 @@ fn from_lrclib(hits: &[Value], dur_ms: i32) -> Vec<Lyrics> {
 }
 
 /// A Unison answer (`unison.ts`): TTML, LRC or plain text.
-fn from_unison(data: &Value, dur_ms: i32) -> Vec<Lyrics> {
+fn from_unison(data: &Value, video_id: &str, dur_ms: i32) -> Vec<Lyrics> {
     let (Some(format), Some(text)) = (data["format"].as_str(), data["lyrics"].as_str()) else { return vec![] };
     let lyrics = match format {
         "ttml" => {
@@ -595,7 +634,13 @@ fn from_unison(data: &Value, dur_ms: i32) -> Vec<Lyrics> {
         "plain" => Lyrics::new(Provider::UnisonPlain, parse_plain(text), None, vec![]),
         _ => None,
     };
-    lyrics.into_iter().collect()
+    let s = |v: &Value| v.as_str().filter(|t| !t.trim().is_empty()).map(str::to_owned);
+    let sub = &data["submitter"];
+    let credit = UnisonCredit {
+        video_id: s(&data["videoId"]).unwrap_or_else(|| video_id.to_owned()),
+        submitter: s(&sub["displayName"]).zip(s(&sub["keyId"])),
+    };
+    lyrics.into_iter().map(|l| Lyrics { unison: Some(credit.clone()), ..l }).collect()
 }
 
 // ------------------------------------------------------------------- shared helpers
@@ -1490,7 +1535,7 @@ mod tests {
 
     fn timed(lines: &[(i32, i32, &str, bool)], sync: Sync) -> Lyrics {
         let lines = lines.iter().map(|&(start, dur, text, instrumental)| Line { start, dur, text: text.into(), instrumental, ..Default::default() }).collect();
-        Lyrics { lines, sync, provider: Provider::LrclibSynced, language: None, songwriters: vec![] }
+        Lyrics { lines, sync, provider: Provider::LrclibSynced, language: None, songwriters: vec![], unison: None }
     }
 
     #[test]
@@ -1631,6 +1676,33 @@ Two");
         assert_eq!(ttml_time("12.5s"), 12500);
         assert_eq!(ttml_time("250ms"), 250);
         assert_eq!(ttml_time("01:00:01.000"), 3_601_000);
+    }
+
+    #[test]
+    fn unison_lyrics_saved_without_a_credit_credit_unison_alone() {
+        let lyrics = |provider, unison| Lyrics { lines: vec![], sync: Sync::None, provider, language: None, songwriters: vec![], unison };
+        let had = UnisonCredit { video_id: "v".into(), submitter: Some(("boidu".into(), "k".into())) };
+        let mut set = LyricsSet { sources: vec![lyrics(Provider::UnisonSynced, None), lyrics(Provider::UnisonPlain, Some(had.clone())), lyrics(Provider::LrclibSynced, None)] };
+        set.credit_unison("v");
+        assert_eq!(set.sources[0].unison, Some(UnisonCredit { video_id: "v".into(), submitter: None }));
+        // One that has its credit keeps it, and other sources get none.
+        assert_eq!((set.sources[1].unison.as_ref(), set.sources[2].unison.as_ref()), (Some(&had), None));
+    }
+
+    #[test]
+    fn unison_credits_the_song_and_submitter() {
+        let v: Value = serde_json::from_str(include_str!("testdata/unison-hey-boyyy.json")).unwrap();
+        let got = from_unison(&v["data"], "asked", 180_000);
+        let c = got[0].unison.as_ref().unwrap();
+        assert_eq!(got[0].provider, Provider::UnisonRich);
+        assert_eq!(c.song_url(), "https://unison.betterlyrics.org/song/Xk_vH2uOb2c");
+        let (name, key) = c.submitter.as_ref().unwrap();
+        assert_eq!(name, "boidu");
+        assert_eq!(UnisonCredit::submitter_url(key), "https://unison.betterlyrics.org/curator/a80e8e35cf2d400a2d6a52abb66118690f0c81a7bfad4c4a1603d61e85ae6ea2");
+        // No submitter or video id: Unison alone, linked to the song asked for.
+        let bare = serde_json::json!({ "format": "plain", "lyrics": "la la" });
+        let c = from_unison(&bare, "asked", 0)[0].unison.clone().unwrap();
+        assert_eq!(c, UnisonCredit { video_id: "asked".into(), submitter: None });
     }
 
     #[test]

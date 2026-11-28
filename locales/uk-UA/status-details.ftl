@@ -45,6 +45,21 @@ status-episodes = { $count ->
     [many] { $count } випусків
    *[other] { $count } випуску
 }
+status-plays = { $count ->
+    [one] { $shown } відтворення
+    [few] { $shown } відтворення
+    [many] { $shown } відтворень
+   *[other] { $shown } відтворення
+}
+status-subscribers = { $count ->
+    [one] { $shown } підписник
+    [few] { $shown } підписники
+    [many] { $shown } підписників
+   *[other] { $shown } підписника
+}
 status-download-quoted-title = «{ $title }»
 discord-view-artist = До виконавця
 discord-view-album = До альбому
+status-kept-downloaded = Залишати завантаженим: треки, додані до цього списку, теж завантажуються
+status-not-kept-downloaded = Більше не залишається завантаженим. Уже завантажені треки лишаються
+status-resumed-at = Продовжуємо з місця, де ви зупинились, з { $time }

@@ -45,6 +45,13 @@ struct Entry {
     list: Option<String>,
 }
 
+impl Entry {
+    /// Whether it's the song version of the music video `video_id`.
+    fn stands_for(&self, video_id: &str) -> bool {
+        self.stands_for.as_deref() == Some(video_id) || self.videos.iter().any(|v| v == video_id)
+    }
+}
+
 /// An album or playlist whose songs go in a folder of their own: its id, and the name
 /// its folder takes (`list_name`).
 #[derive(Clone, Debug, PartialEq)]
@@ -68,10 +75,25 @@ struct State {
     /// The songs saved this session, in the order they were: Library › Downloads takes
     /// on the new ones (`saved_since`) without looking at every file again.
     saved: Vec<String>,
+    /// The music videos the files are song versions of, with the songs that stand in for
+    /// them: rows look a music video up each frame without going through every download.
+    by_video: HashMap<String, Vec<String>>,
+}
+
+impl State {
+    /// Work out `by_video` again, after the index changed.
+    fn relink(&mut self) {
+        self.by_video.clear();
+        for (id, e) in &self.index {
+            for v in e.stands_for.iter().chain(&e.videos) {
+                self.by_video.entry(v.clone()).or_default().push(id.clone());
+            }
+        }
+    }
 }
 
 static STATE: LazyLock<RwLock<State>> =
-    LazyLock::new(|| RwLock::new(State { index: HashMap::new(), file: PathBuf::new(), folder: default_folder(), per_list: false, file_lyrics: FileLyrics::Synced, gone: HashSet::new(), saved: Vec::new() }));
+    LazyLock::new(|| RwLock::new(State { index: HashMap::new(), file: PathBuf::new(), folder: default_folder(), per_list: false, file_lyrics: FileLyrics::Synced, gone: HashSet::new(), saved: Vec::new(), by_video: HashMap::new() }));
 
 /// Music\ytm-rs.
 pub fn default_folder() -> PathBuf {
@@ -121,6 +143,7 @@ pub fn init(data_dir: &Path, folder: &str, per_list: bool, file_lyrics: FileLyri
     };
     let mut st = STATE.write().unwrap();
     st.index = index;
+    st.relink();
     st.file = file;
     st.folder = if folder.is_empty() { default_folder() } else { PathBuf::from(folder) };
     st.per_list = per_list;
@@ -128,15 +151,21 @@ pub fn init(data_dir: &Path, folder: &str, per_list: bool, file_lyrics: FileLyri
     drop(st);
     // Which files are gone: disk work, off the UI thread.
     std::thread::spawn(|| {
-        let entries: Vec<(String, PathBuf)> = STATE.read().unwrap().index.iter().map(|(id, e)| (id.clone(), e.path.clone())).collect();
-        set_gone(entries.into_iter().filter(|(_, p)| !p.is_file()).collect());
+        let (entries, since) = {
+            let st = STATE.read().unwrap();
+            (st.index.iter().map(|(id, e)| (id.clone(), e.path.clone())).collect::<Vec<_>>(), st.saved.len())
+        };
+        set_gone(entries.into_iter().filter(|(_, p)| !p.is_file()).collect(), since);
     });
 }
 
-/// Remember these songs' files as gone (unless one's been saved again meanwhile).
-fn set_gone(missing: Vec<(String, PathBuf)>) {
+/// Remember these songs' files as gone, from a look begun when `since` songs had been
+/// saved this session: not one saved again meanwhile. No disk work here, with the lock
+/// held that every row's mark reads.
+fn set_gone(missing: Vec<(String, PathBuf)>, since: usize) {
     let mut st = STATE.write().unwrap();
-    let gone = missing.into_iter().filter(|(id, p)| st.index.get(id).is_some_and(|e| &e.path == p && !p.is_file())).map(|(id, _)| id).collect();
+    let saved_since = st.saved.get(since..).unwrap_or_default();
+    let gone = missing.into_iter().filter(|(id, p)| !saved_since.contains(id) && st.index.get(id).is_some_and(|e| &e.path == p)).map(|(id, _)| id).collect();
     st.gone = gone;
     LOOKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 }
@@ -267,7 +296,7 @@ fn retime_settled(video_id: &str, wait: impl FnOnce()) -> bool {
 pub fn pick_folder(ctx: &egui::Context) {
     let ctx = ctx.clone();
     std::thread::spawn(move || {
-        if let Some(dir) = rfd::FileDialog::new().set_title("Download folder").set_directory(folder()).pick_folder() {
+        if let Some(dir) = rfd::FileDialog::new().set_title(crate::tr!("settings-download-folder")).set_directory(folder()).pick_folder() {
             set_folder(dir);
             ctx.request_repaint();
         }
@@ -375,6 +404,15 @@ pub fn path(video_id: &str) -> Option<PathBuf> {
     STATE.read().unwrap().index.get(video_id).map(|e| e.path.clone()).filter(|p| p.is_file())
 }
 
+/// The file of a downloaded song, or of a music video's song version: what its menu
+/// shows in the folder. Disk work.
+pub fn file_for(t: &Track) -> Option<PathBuf> {
+    path(&t.id).or_else(|| {
+        let p = entry_for(&STATE.read().unwrap(), t).map(|e| e.path.clone());
+        p.filter(|p| p.is_file())
+    })
+}
+
 /// Whether all these songs are downloaded, as last looked (no look at the files now, so
 /// it's quick enough for the UI thread; startup and Library › Downloads look).
 /// A music video counts when its song version is.
@@ -389,6 +427,12 @@ pub fn not_listed(tracks: &[Track]) -> Vec<Track> {
     let st = STATE.read().unwrap();
     let videos = song_versions(&st, tracks);
     tracks.iter().filter(|t| !listed_now(&st, &videos, t)).cloned().collect()
+}
+
+/// Whether this song is downloaded (or, a music video, its song version), as last looked
+/// (see `all_listed`): for the mark on its row.
+pub fn is_listed(t: &Track) -> bool {
+    entry_for(&STATE.read().unwrap(), t).is_some()
 }
 
 /// Whether any of these songs are downloaded, as last looked (see `all_listed`).
@@ -420,9 +464,8 @@ fn listed_now(st: &State, videos: &HashSet<&str>, t: &Track) -> bool {
 /// when last looked.
 fn entry_for<'a>(st: &'a State, t: &Track) -> Option<&'a Entry> {
     let here = |(id, e): (&String, &'a Entry)| (!st.gone.contains(id)).then_some(e);
-    let stands_for = |e: &Entry| e.stands_for.as_deref() == Some(t.id.as_str()) || e.videos.contains(&t.id);
     st.index.get_key_value(&t.id).and_then(here).or_else(|| match t.music_video {
-        true => st.index.iter().filter(|(_, e)| stands_for(e)).find_map(here),
+        true => st.by_video.get(&t.id).into_iter().flatten().filter_map(|id| st.index.get_key_value(id)).find_map(here),
         false => None,
     })
 }
@@ -432,8 +475,25 @@ pub fn song_for(video_id: &str) -> Option<Track> {
     let st = STATE.read().unwrap();
     st.index
         .values()
-        .find(|e| (e.stands_for.as_deref() == Some(video_id) || e.videos.iter().any(|v| v == video_id)) && e.path.is_file())
+        .find(|e| e.stands_for(video_id) && e.path.is_file())
         .and_then(|e| e.song.clone().or_else(|| e.track.clone()))
+}
+
+/// The file `id` plays from: its own, or its song version's when it's a music video.
+fn file_of(id: &str) -> Option<PathBuf> {
+    let st = STATE.read().unwrap();
+    // A file that's gone isn't played from (`entry_for`), so it isn't read either.
+    // Only the song versions' files are looked at, not every download's.
+    let there = |e: &&Entry| e.path.is_file();
+    st.index.get(id).filter(there).or_else(|| st.index.values().find(|e| e.stands_for(id) && e.path.is_file())).map(|e| e.path.clone())
+}
+
+/// The cover tagged in `id`'s downloaded file (see `file_of`), for the background's
+/// colours when the art can't be fetched, as offline. Reads the file: disk work.
+pub fn cover(id: &str) -> Option<Vec<u8>> {
+    let path = file_of(id)?;
+    let tag = mp4ameta::Tag::read_from_path(&path).inspect_err(|e| log::debug!("no cover from {}: {e}", path.display())).ok()?;
+    tag.artwork().map(|img| img.data.to_vec())
 }
 
 /// The downloaded song `song_id` is the song version of the music video `video_id` too.
@@ -448,6 +508,7 @@ pub fn link_video(song_id: &str, video_id: &str) {
         if e.song.is_none() {
             e.song = e.track.clone();
         }
+        st.relink();
     }
     write_index();
 }
@@ -478,7 +539,10 @@ fn add_video(first: &mut Option<String>, videos: &mut Vec<String>, video_id: &st
 /// Every downloaded song whose file is still there, newest first: Library › Downloads.
 /// A song version is listed as the song (its file plays for the music video too).
 pub fn all() -> Vec<Track> {
-    let entries: Vec<(String, Entry)> = STATE.read().unwrap().index.iter().map(|(id, e)| (id.clone(), e.clone())).collect();
+    let (entries, since) = {
+        let st = STATE.read().unwrap();
+        (st.index.iter().map(|(id, e)| (id.clone(), e.clone())).collect::<Vec<_>>(), st.saved.len())
+    };
     let mut missing = Vec::new();
     let mut found: Vec<(std::time::SystemTime, Track)> = entries
         .into_iter()
@@ -491,7 +555,7 @@ pub fn all() -> Vec<Track> {
             Some((modified, listed(id, e)))
         })
         .collect();
-    set_gone(missing);
+    set_gone(missing, since);
     found.sort_by_key(|(modified, _)| std::cmp::Reverse(*modified));
     found.into_iter().map(|(_, t)| t).collect()
 }
@@ -724,6 +788,7 @@ pub fn save(t: &Track, audio: &[u8], duration_ms: u64, loudness_db: Option<f32>,
         st.gone.remove(&t.id);
         st.index.insert(t.id.clone(), Entry { path: path.clone(), duration_ms, loudness_db, stands_for: first, videos, song, track, list });
         st.saved.push(t.id.clone());
+        st.relink();
     }
     write_index();
     Ok(path)
@@ -995,6 +1060,11 @@ mod tests {
             assert!(e.song.is_some());
         }
         assert_eq!(song_for("vc").map(|t| t.id), Some("a".to_owned()));
+        // The cover's read from the song's own file, a music video's from its song version's.
+        assert_eq!((file_of("a"), file_of("vc"), file_of("b")), (Some(a.clone()), Some(a.clone()), Some(b.clone())));
+        assert_eq!(file_of("missing"), None);
+        // Not an .m4a, so no cover, and nothing breaks.
+        assert_eq!(cover("a"), None);
 
         // Written to disk with every change, read back whole.
         let written: HashMap<String, Entry> = serde_json::from_slice(&std::fs::read(dir.join("downloads.json")).unwrap()).unwrap();
@@ -1021,6 +1091,26 @@ mod tests {
         assert_eq!((written["c"].list.as_deref(), written["a"].list.as_deref()), (Some("PL1"), None));
         assert!(any_listed(&[song("x", "X"), song("c", "C")]) && !all_listed(&[song("x", "X"), song("c", "C")]));
         assert_eq!(not_listed(&[song("x", "X"), song("c", "C")]).iter().map(|t| t.id.as_str()).collect::<Vec<_>>(), ["x"]);
+        // A row's mark: the song itself, or a music video whose song version is downloaded.
+        let video = |id: &str| Track { music_video: true, ..song(id, "V") };
+        assert!(is_listed(&song("c", "C")) && is_listed(&video("vc")));
+        assert!(!is_listed(&song("x", "X")) && !is_listed(&video("vx")));
+
+        // A cover tagged the way a download is, read back: a file with no audio, just the
+        // boxes the tags need.
+        let mut mvhd = [&b"\0\0\0\x6cmvhd"[..], &[0; 100]].concat();
+        mvhd[20..24].copy_from_slice(&1000u32.to_be_bytes()); // its timescale
+        let m4a = [&b"\0\0\0\x14ftypM4A \0\0\0\0M4A "[..], b"\0\0\0\x74moov", &mvhd, b"\0\0\0\x08mdat"].concat();
+        let mut png = Vec::new();
+        image::RgbImage::from_pixel(4, 4, image::Rgb([30, 90, 220])).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+        save(&song("f", "F"), &m4a, 0, None, Some(png.clone()), Some("vf".into()), None).unwrap();
+        assert_eq!((cover("f").as_deref(), cover("vf").as_deref()), (Some(&png[..]), Some(&png[..])));
+        let art = crate::art::process(&cover("f").unwrap()).unwrap();
+        assert!(art.accent.b() > art.accent.r(), "the accent is the cover's blue, not {:?}", art.accent);
+        // The video saved on its own too, but that file is gone: its song version's plays,
+        // so its cover is taken.
+        std::fs::remove_file(save(&song("vf", "VF"), &m4a, 0, None, None, None, None).unwrap()).unwrap();
+        assert_eq!(cover("vf").as_deref(), Some(&png[..]));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1036,7 +1126,7 @@ mod tests {
     #[test]
     fn the_file_gets_the_chosen_sources_lyrics_as_set() {
         use crate::lyrics::{Line, Lyrics, Sync};
-        let lyrics = |provider, text: &str| Lyrics { lines: vec![Line { start: 2000, dur: 1000, text: text.into(), ..Default::default() }], sync: Sync::Line, provider, language: None, songwriters: vec![] };
+        let lyrics = |provider, text: &str| Lyrics { lines: vec![Line { start: 2000, dur: 1000, text: text.into(), ..Default::default() }], sync: Sync::Line, provider, language: None, songwriters: vec![], unison: None };
         let set = LyricsSet { sources: vec![lyrics(Provider::BLyricsRich, "first"), lyrics(Provider::LrclibSynced, "picked")] };
         let order: Vec<(Provider, bool)> = Provider::ALL.iter().map(|p| (*p, true)).collect();
         let pins = HashMap::from([("v".to_owned(), Provider::LrclibSynced)]);

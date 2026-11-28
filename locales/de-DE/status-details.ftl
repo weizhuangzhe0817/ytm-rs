@@ -10,6 +10,7 @@ status-playlist-created = Playlist erstellt
 status-new-playlist-tracks = Zur neuen Playlist hinzugefügt: { $count }
 status-playlist-added = Zur Playlist hinzugefügt
 status-playlist-updated = Playlist aktualisiert
+status-picture-unreadable = Das Bild konnte nicht gelesen werden. Versuche ein JPEG, PNG oder WebP.
 status-playlist-sorted = Playlist sortiert
 status-playlist-sort-failed = Playlist konnte nicht sortiert werden
 status-playlist-move-failed = YouTube Music hat die Verschiebung nicht übernommen
@@ -38,6 +39,17 @@ status-episodes = { $count ->
     [one] { $count } Folge
    *[other] { $count } Folgen
 }
+status-plays = { $count ->
+    [one] { $shown } Wiedergabe
+   *[other] { $shown } Wiedergaben
+}
+status-subscribers = { $count ->
+    [one] { $shown } Abonnent
+   *[other] { $shown } Abonnenten
+}
 status-download-quoted-title = „{ $title }“
 discord-view-artist = Zum Interpreten
 discord-view-album = Zum Album
+status-kept-downloaded = Heruntergeladen behalten: Titel, die zu dieser Playlist kommen, werden auch heruntergeladen
+status-not-kept-downloaded = Wird nicht mehr heruntergeladen behalten. Bereits heruntergeladene Titel bleiben
+status-resumed-at = Es geht weiter, wo du warst, bei { $time }

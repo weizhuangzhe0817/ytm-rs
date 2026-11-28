@@ -4,9 +4,16 @@ status-link-copied = Link copied
 status-starting-playback = Starting playback…
 status-playing-next = Playing next
 status-added-queue = Added to queue
+# In the system's list of what keeps the computer awake, while music plays.
+status-keeping-awake = Playing music
 status-removed-queue = Removed from queue
 status-cleared-queue = Queue cleared
 status-removed-playlist = Removed from playlist
+status-not-added-duplicates =
+    { $count ->
+        [one] Not added: it's already in “{ $title }”
+       *[other] Nothing added: some of these songs are already in “{ $title }”
+    }
 status-playlist-deleted = Playlist deleted
 status-added-liked = Added to Liked Music
 status-sign-in-like = Sign in to like songs

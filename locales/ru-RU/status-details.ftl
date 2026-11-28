@@ -45,6 +45,21 @@ status-episodes = { $count ->
     [many] { $count } выпусков
    *[other] { $count } выпуска
 }
+status-plays = { $count ->
+    [one] { $shown } прослушивание
+    [few] { $shown } прослушивания
+    [many] { $shown } прослушиваний
+   *[other] { $shown } прослушивания
+}
+status-subscribers = { $count ->
+    [one] { $shown } подписчик
+    [few] { $shown } подписчика
+    [many] { $shown } подписчиков
+   *[other] { $shown } подписчика
+}
 status-download-quoted-title = «{ $title }»
 discord-view-artist = К исполнителю
 discord-view-album = К альбому
+status-kept-downloaded = Оставлять скачанным: треки, добавленные в этот плейлист, тоже скачиваются
+status-not-kept-downloaded = Больше не оставляется скачанным. Уже скачанные треки остаются
+status-resumed-at = Продолжаем с места, где вы остановились, с { $time }

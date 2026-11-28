@@ -116,7 +116,8 @@ fn behind_panel(app: &App, ctx: &egui::Context, area: Rect, now: f64) -> Option<
     let track = app.current()?;
     // A video takes the middle instead of the cover.
     let vis = if app.shown_video().is_some() { 1.0 } else { 1.0 - panel_motion(app, ctx, &track.id, app.no_lyrics(), now).art_vis };
-    Some(BehindPanel { beside: content_wide(area), vis })
+    let (_, content) = np_rects(area, app.fullscreen);
+    Some(BehindPanel { beside: content_wide(ctx, content), vis })
 }
 
 /// Now playing's background laid out over `rect`, drawn only inside `clip`.
@@ -315,11 +316,11 @@ fn body(app: &mut App, ui: &mut Ui, now: f64) {
     let area = ui.max_rect();
     let video = app.shown_video().cloned();
     let video_mode = video.is_some();
-    let video_lyrics = video_mode && look.now_playing.video_lyrics && !app.no_lyrics() && content_wide(area);
+    let (header, content) = np_rects(area, app.fullscreen);
+    // Decided every frame, a video's too, so what it was is never one from before a resize.
+    let wide = content_wide(ui.ctx(), content);
+    let video_lyrics = video_mode && look.now_playing.video_lyrics && !app.no_lyrics() && wide;
     let no_lyrics = app.no_lyrics() || (video_mode && !video_lyrics);
-    // Header: on the window buttons' line, when the app draws them.
-    let lift = 20.0 - f32::from(super::titlebar::top_margin(20, 44.0));
-    let header = Rect::from_min_size(area.min - vec2(0.0, if app.fullscreen { 0.0 } else { lift }), vec2(area.width(), 44.0));
     // In some themes full screen's header leaves until the pointer moves. It comes back at once, and for the keyboard too.
     let hide = look.now_playing.header_autohide && app.fullscreen;
     let moved_id = egui::Id::unique("np-pointer-moved");
@@ -331,14 +332,10 @@ fn body(app: &mut App, ui: &mut Ui, now: f64) {
     }
     let quiet = hide && now - ui.ctx().data(|d| d.get_temp::<f64>(moved_id)).unwrap_or(now) > 2.5;
     let shown_header = theme::anim_bool(ui.ctx(), "np-header-shown", !quiet, 0.3);
-    let header_real = header;
     let header = header.translate(vec2(0.0, -(header.height() + 20.0) * (1.0 - shown_header)));
     if hide && !quiet {
         ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
     }
-    // The content first: some themes run the lyrics up under the header in full screen,
-    // and its buttons go over them, taking the clicks.
-    let content = Rect::from_min_max(pos2(area.left(), header_real.bottom() + 12.0), area.max);
     if app.fullscreen && look.now_playing.fullscreen_progress_px > 0.0 {
         fullscreen_progress(app, ui, ui.ctx().content_rect(), look.now_playing.fullscreen_progress_px);
     }
@@ -587,7 +584,7 @@ fn panel_motion(app: &App, ctx: &egui::Context, track_id: &str, no_lyrics: bool,
             next
         }
     };
-    let p = ctx.animate_bool_with_time(egui::Id::unique("np-panel"), state.want, 0.6 * theme::SPEED);
+    let p = ctx.animate_bool_with_time(egui::Id::unique("np-panel"), state.want, 0.6 * theme::speed());
     if p > 0.0 && p < 1.0 {
         // Every frame while sliding, not the now-playing view's usual 30 fps.
         ctx.request_repaint();
@@ -636,13 +633,16 @@ fn np_content(app: &mut App, ui: &mut Ui, content: Rect, track: &crate::model::T
     let window_w = ui.ctx().content_rect().width();
     // The cover gliding between its two places (wide layouts): a gentle S-curve.
     let glide = p * p * (3.0 - 2.0 * p);
-    let narrow = !content_wide(content);
-    let corner = !narrow && layout == Layout::Corner;
-    let fs_corner = !narrow && app.fullscreen && cs.fullscreen.is_some_and(|f| f.corner_layout);
+    let portrait = portrait_layout(ui.ctx(), content);
+    let wide = content_wide(ui.ctx(), content);
+    let narrow = !portrait && !wide;
+    let corner = wide && layout == Layout::Corner;
+    let fs_corner = wide && app.fullscreen && cs.fullscreen.is_some_and(|f| f.corner_layout);
     let lyrics_only = narrow || corner || fs_corner || layout == Layout::LyricsOnly;
     // reCover: the backdrop cover sits on the left, so the lyrics take the right side.
-    let beside_cover = !narrow && layout == Layout::LyricsOnly && look.background.fullbleed(app.fullscreen);
-    let centered = lyrics_only && !beside_cover;
+    let beside_cover = wide && layout == Layout::LyricsOnly && look.background.fullbleed(app.fullscreen);
+    let centered = portrait || (lyrics_only && !beside_cover);
+    let stacked_portrait = portrait && !lyrics_only;
     // Artwork alone: centered.
     let col_art = Rect::from_center_size(content.center(), vec2(content.width().min(content.height() * 0.9), content.height()));
     let np = &look.now_playing;
@@ -665,7 +665,7 @@ fn np_content(app: &mut App, ui: &mut Ui, content: Rect, track: &crate::model::T
             let px = (art_side(cs, col_alone, app.fullscreen, window_w) * ppp) as u32;
             let mut cui = ui.new_child(egui::UiBuilder::new().max_rect(content));
             cui.multiply_opacity(art_vis);
-            cover_column(app, &mut cui, col_alone.translate(vec2(-slide * (1.0 - art_vis), 0.0)), track, no_lyrics, now, px);
+            cover_column(app, &mut cui, col_alone.translate(vec2(-slide * (1.0 - art_vis), 0.0)), track, no_lyrics, now, px, None);
         }
         if art_vis < 0.999 {
             let mut cui = ui.new_child(egui::UiBuilder::new().max_rect(content));
@@ -683,16 +683,28 @@ fn np_content(app: &mut App, ui: &mut Ui, content: Rect, track: &crate::model::T
         if art_vis > 0.001 {
             let mut cui = ui.new_child(egui::UiBuilder::new().max_rect(content));
             cui.multiply_opacity(art_vis);
-            cover_column(app, &mut cui, col_alone.translate(vec2(-slide * (1.0 - art_vis), 0.0)), track, no_lyrics, now, px);
+            cover_column(app, &mut cui, col_alone.translate(vec2(-slide * (1.0 - art_vis), 0.0)), track, no_lyrics, now, px, None);
         } else {
             // Hidden behind the lyrics: have it loaded for when they're turned off.
             widgets::preload_cover(ui.ctx(), &track.thumbs, px);
         }
-        let full_panel = look.now_playing.fullscreen_panel_frac.filter(|_| app.fullscreen);
+        let full_panel = look.now_playing.fullscreen_panel_frac.filter(|_| app.fullscreen && !portrait);
         if let Some(f) = full_panel {
             let side = content.width() * (1.0 - f);
             if cover_side == Side::Right { Rect::from_min_max(content.min, pos2(content.right() - side, content.bottom())) } else { Rect::from_min_max(pos2(content.left() + side, content.top()), content.max) }
         } else if beside_cover { Rect::from_min_max(pos2(content.left() + content.width() * 0.46, content.top()), content.max) } else { content }
+    } else if stacked_portrait {
+        let (col_panel, side_panel, card_panel) = portrait_panel(look, content, app.fullscreen);
+        let side_alone = art_side(cs, col_alone, app.fullscreen, window_w);
+        let col = Rect::from_min_max(col_alone.min.lerp(col_panel.min, glide), col_alone.max.lerp(col_panel.max, glide));
+        let side_now = egui::lerp(side_alone..=side_panel, glide);
+        let px = (side_alone.max(side_panel) * ppp) as u32;
+        cover_column(app, ui, col, track, no_lyrics, now, px, Some((side_now, glide)));
+        // The card goes with the cover: in the corner while it's on its own (which leaves the
+        // card room), by it once stacked. It fades between the two rather than moving, or it
+        // would cross the panel coming in.
+        card_at = if glide < 0.5 { content } else { card_panel };
+        Rect::from_min_max(pos2(content.left(), (col_panel.bottom() + 12.0).min(content.bottom())), content.max)
     } else {
         // Cover column, on the preset's side; it glides to the center as the panel leaves.
         let frac = match look.now_playing.panel_frac {
@@ -710,7 +722,7 @@ fn np_content(app: &mut App, ui: &mut Ui, content: Rect, track: &crate::model::T
         let col = Rect::from_min_max(col_art.min.lerp(col_panel.min, glide), col_art.max.lerp(col_panel.max, glide));
         // One image size for the whole glide, the bigger of its two ends.
         let px = (art_side(cs, col_art, app.fullscreen, window_w).max(art_side(cs, col_panel, app.fullscreen, window_w)) * ppp) as u32;
-        cover_column(app, ui, col, track, no_lyrics, now, px);
+        cover_column(app, ui, col, track, no_lyrics, now, px, None);
         card_at = col;
         if cover_side == Side::Right {
             Rect::from_min_max(content.min, pos2(col_panel.left() - 28.0, content.bottom()))
@@ -718,9 +730,9 @@ fn np_content(app: &mut App, ui: &mut Ui, content: Rect, track: &crate::model::T
             Rect::from_min_max(pos2(col_panel.right() + 28.0, content.top()), content.max)
         }
     };
-    // The theme's card for the song, in the corner (the cover then has no title under it).
-    // It stays with the backdrop's cover too, so it's the one card through the transition.
-    let card_vis = if fs_corner { art_vis } else if corner { 0.0 } else if beside_cover || !lyrics_only { 1.0 } else { art_vis };
+    // The theme's card for the song, in a corner of the cover's place (the cover then has no
+    // title under it). It stays with the backdrop's cover too, so it's the one card through the transition.
+    let card_vis = if stacked_portrait { (2.0 * glide - 1.0).abs() } else if fs_corner { art_vis } else if corner { 0.0 } else if beside_cover || !lyrics_only { 1.0 } else { art_vis };
     if np.shows_info_card(app.fullscreen) && card_vis > 0.001 {
         let mut card = ui.new_child(egui::UiBuilder::new().max_rect(card_at));
         card.multiply_opacity(card_vis);
@@ -730,13 +742,18 @@ fn np_content(app: &mut App, ui: &mut Ui, content: Rect, track: &crate::model::T
         return;
     }
     let toward = if !lyrics_only && cover_side == Side::Right { -slide } else { slide };
-    let rect = right.translate(vec2(toward * (1.0 - panel_vis), 0.0));
+    let shift = if stacked_portrait { vec2(0.0, slide) } else { vec2(toward, 0.0) };
+    let rect = right.translate(shift * (1.0 - panel_vis));
     let inset = look.now_playing.fullscreen_panel_inset.filter(|_| app.fullscreen);
-    let rect = inset.map_or(rect, |[top, bottom]| Rect::from_min_max(pos2(rect.left(), rect.top() + top), pos2(rect.right(), rect.bottom() - bottom)));
+    let rect = inset.map_or(rect, |[top, bottom]| {
+        let top = rect.top() + if stacked_portrait { top.max(0.0) } else { top };
+        let bottom = (rect.bottom() - bottom).max(top);
+        Rect::from_min_max(pos2(rect.left(), top), pos2(rect.right(), bottom))
+    });
     // Switching between Lyrics, Up next and Comments: the old one fades out over the first 55%,
     // the new one fades in and rises into place from a third of the way.
     for (tab, key) in [(NpTab::Lyrics, "np-tab-lyrics"), (NpTab::UpNext, "np-tab-upnext"), (NpTab::Comments, "np-tab-comments")] {
-        let w = ui.ctx().animate_bool_with_time(egui::Id::unique(key), panel_tab == tab, 0.45 * theme::SPEED);
+        let w = ui.ctx().animate_bool_with_time(egui::Id::unique(key), panel_tab == tab, 0.45 * theme::speed());
         if w > 0.0 && w < 1.0 {
             ui.ctx().request_repaint();
         }
@@ -752,7 +769,11 @@ fn np_content(app: &mut App, ui: &mut Ui, content: Rect, track: &crate::model::T
         let rise = if panel_tab == tab { 18.0 * (1.0 - vis) } else { 0.0 };
         let r = rect.translate(vec2(0.0, rise));
         let mut rui = ui.new_child(egui::UiBuilder::new().max_rect(r));
-        rui.set_clip_rect(if inset.is_some() { ui.clip_rect() } else { content.intersect(ui.clip_rect()) });
+        let mut clip = if inset.is_some() { ui.clip_rect() } else { content.intersect(ui.clip_rect()) };
+        if stacked_portrait {
+            clip = clip.with_min_y(clip.min.y.max(right.top()));
+        }
+        rui.set_clip_rect(clip);
         rui.multiply_opacity(panel_vis * vis);
         match tab {
             NpTab::Lyrics => lyrics_panel(app, &mut rui, r, now, centered),
@@ -801,6 +822,8 @@ fn fullscreen_progress(app: &mut App, ui: &mut Ui, screen: Rect, px: f32) {
     if total > 0.0 {
         let filled = Rect::from_min_size(r.min, vec2(r.width() * pos / total, r.height()));
         ui.painter().rect_filled(filled, bar_r, theme::with_alpha(Color32::WHITE, 0.32));
+        super::ab_loop::paint_loop(app, ui, r, total, pos, bar_r, Color32::WHITE);
+        super::ab_loop::loop_menu(app, ui, &resp, r, total, pos);
         let font = theme::semibold((px * 0.55).clamp(10.0, 14.0));
         widgets::time_at(ui, pos2(r.left() + 12.0, r.center().y), egui::Align2::LEFT_CENTER, &super::fmt_time(pos as u32), font.clone(), Color32::WHITE);
         widgets::time_at(ui, pos2(r.right() - 12.0, r.center().y), egui::Align2::RIGHT_CENTER, &super::fmt_end(pos, total, app.time_left), font, Color32::WHITE);
@@ -813,9 +836,81 @@ fn fullscreen_progress(app: &mut App, ui: &mut Ui, screen: Rect, px: f32) {
     }
 }
 
+/// Header and content rects inside `area`, shared by `behind_panel` and `body`.
+fn np_rects(area: Rect, fullscreen: bool) -> (Rect, Rect) {
+    let lift = if fullscreen { 0.0 } else { 20.0 - f32::from(super::titlebar::top_margin(20, 44.0)) };
+    let header = Rect::from_min_size(area.min - vec2(0.0, lift), vec2(area.width(), 44.0));
+    let content = Rect::from_min_max(pos2(area.left(), header.bottom() + 12.0), area.max);
+    (header, content)
+}
+
+/// Whether the cover stacks over the panel in `content` (a portrait monitor, or a tall,
+/// narrow window). It's kept across frames so a window resized near the line doesn't flip.
+fn portrait_layout(ctx: &egui::Context, content: Rect) -> bool {
+    let id = egui::Id::unique("np-portrait");
+    let was = ctx.data(|d| d.get_temp::<bool>(id)).unwrap_or(false);
+    let now = is_portrait(content.size(), was);
+    if now != was {
+        ctx.data_mut(|d| d.insert_temp(id, now));
+    }
+    now
+}
+
+/// The content's height to width from which it stacks, and below which it goes back side
+/// by side. Half of a 16:9, 16:10 or 3:2 screen stays under 1.33 however large it is (about 1.2
+/// at the usual sizes), so it stays side by side; a portrait monitor comes to about 1.7, a
+/// 3:2 tablet stood up to 1.38, a third of a 1440p screen to 1.55.
+const PORTRAIT_RATIO: [f32; 2] = [1.35, 1.3];
+
+/// No least size: it's in points, and the smallest window (`MIN_SIZE`) this tall has room
+/// for the cover and the panel.
+fn is_portrait(content: Vec2, was: bool) -> bool {
+    content.y >= content.x * PORTRAIT_RATIO[usize::from(was)]
+}
+
+/// The stacked layout's cover column at the top, the artwork's side, and where the theme's
+/// card for the song goes: under the cover, or over it with `info_card_top`, at its left edge.
+fn portrait_panel(look: &crate::preset::Preset, content: Rect, fullscreen: bool) -> (Rect, f32, Rect) {
+    let np = &look.now_playing;
+    let text_h = if !np.shows_info_card(fullscreen) && np.shows_title(fullscreen) {
+        let [title_px, artist_px] = np.fullscreen_text_px.filter(|_| fullscreen).unwrap_or([np.title_px, np.artist_px]);
+        match np.fullscreen_title_card.filter(|_| fullscreen).or(np.title_card) {
+            Some(c) => title_px * 1.4 + artist_px * 1.5 + (c.pad * 2.0).max(22.0) + if c.attached { 0.0 } else { 11.0 },
+            None => 22.0 + title_px * 1.4 + artist_px * 1.3,
+        }
+    } else {
+        0.0
+    };
+    // The card has the title, so it takes the text's place (12 apart from the cover).
+    let card_h = if np.shows_info_card(fullscreen) { info_card_room(np, content).height() + np.info_card_margin + 12.0 } else { 0.0 };
+    let (above, below) = if np.info_card_top { (card_h, text_h) } else { (0.0, text_h + card_h) };
+    let top_pad = (content.height() * 0.03).clamp(16.0, 48.0);
+    // Up to about half the height, but the panel under it keeps 600 points at least: a few
+    // lines even in a theme with large lyrics, in a window only just tall enough to stack.
+    let column = (content.height() * 0.48).min(content.height() - 600.0);
+    let max_h = (column - top_pad - above - below - 16.0).max(100.0);
+    let cs = &look.cover;
+    // The theme's limit, but not its steps by window width: here the cover has the whole width.
+    let cap = (content.width() * 0.82).min(max_h).min(art_max_px(cs, fullscreen, None));
+    let desired = (content.width() * 0.76).min(max_h) * cs.size.clamp(0.65, 1.3);
+    let side = desired.min(cap).max(140.0_f32.min(cap));
+    let col = Rect::from_min_size(content.min + vec2(0.0, top_pad + above), vec2(content.width(), side + below));
+    let edge = (side / 2.0 + np.info_card_margin) * vec2(1.0, 0.0);
+    let card = Rect::from_min_max(pos2(col.center().x, col.top() - above) - edge, pos2(col.center().x, col.bottom()) + edge);
+    (col, side, card)
+}
+
 /// Room for lyrics beside something else.
-fn content_wide(area: Rect) -> bool {
-    area.width() >= 860.0
+fn content_wide(ctx: &egui::Context, area: Rect) -> bool {
+    !portrait_layout(ctx, area) && area.width() >= 860.0
+}
+
+/// Upper pixel bound imposed by the theme on the artwork size; by the window's width
+/// (`window_w`) when it has steps.
+fn art_max_px(cs: &crate::preset::CoverStyle, fullscreen: bool, window_w: Option<f32>) -> f32 {
+    let fs_max = cs.fullscreen.filter(|_| fullscreen).and_then(|f| f.max_px);
+    let stepped = window_w.and_then(|w| cs.size_steps.iter().rev().find(|s| w >= s[0])).map(|s| s[1]);
+    fs_max.or(stepped).or(if fullscreen && cs.fullscreen.is_some() { None } else { cs.max_px }).unwrap_or(f32::INFINITY)
 }
 
 /// Size of the artwork laid out in `col`.
@@ -836,9 +931,7 @@ fn art_side(cs: &crate::preset::CoverStyle, col: Rect, fullscreen: bool, window_
         Some(f) => side.min(col.width() * f),
         None => side,
     };
-    // By the window's width, when it has steps.
-    let stepped = cs.size_steps.iter().rev().find(|s| window_w >= s[0]).map(|s| s[1]);
-    side.min(fs.max_px.or(stepped).or(if fullscreen && cs.fullscreen.is_some() { None } else { cs.max_px }).unwrap_or(f32::INFINITY))
+    side.min(art_max_px(cs, fullscreen, Some(window_w)))
 }
 
 /// The corner layout's cover and title.
@@ -1099,14 +1192,16 @@ fn cover_glyph(ui: &Ui, c: egui::Pos2, glyph: char, px: f32, key: &str, name: &s
 }
 
 /// Artwork with the title and artists under it, laid out in `col`. `px`: the size to
-/// fetch the image at (fixed while the column animates).
+/// fetch the image at (fixed while the column animates). `stacked`: `(side, glide)` for
+/// the stacked portrait layout.
 #[allow(clippy::too_many_arguments)]
-fn cover_column(app: &mut App, ui: &mut Ui, col: Rect, track: &crate::model::Track, no_lyrics: bool, now: f64, px: u32) {
+fn cover_column(app: &mut App, ui: &mut Ui, col: Rect, track: &crate::model::Track, no_lyrics: bool, now: f64, px: u32, stacked: Option<(f32, f32)>) {
     use crate::preset::Shape;
     let look = app.look();
     let cs = &look.cover;
     let np = &look.now_playing;
-    let side = art_side(cs, col, app.fullscreen, ui.ctx().content_rect().width());
+    let side = stacked.map_or_else(|| art_side(cs, col, app.fullscreen, ui.ctx().content_rect().width()), |(s, _)| s);
+    let free = 1.0 - stacked.map_or(0.0, |(_, g)| g);
     // Opening now playing, the cover grows into place.
     let opened = if cs.open_scale < 1.0 || cs.open_slide != 0.0 || cs.open_fade { theme::anim_bool_timed(ui.ctx(), "np-cover-open", app.np_open, cs.open_secs) } else { 1.0 };
     let mut opening = if cs.open_scale < 1.0 { egui::lerp(cs.open_scale..=1.0, opened) } else { 1.0 };
@@ -1119,7 +1214,7 @@ fn cover_column(app: &mut App, ui: &mut Ui, col: Rect, track: &crate::model::Tra
     if let Some(f) = cs.fullscreen.filter(|f| f.enter.is_some() || f.leave.is_some()) {
         let (step, shift) = if app.fullscreen { (f.enter, f.enter_shift_vh) } else { (f.leave, f.leave_shift_vh) };
         let secs = step.map_or(0.0, |[_, s]| s).max(0.01);
-        let full = ui.ctx().animate_bool_with_time(egui::Id::unique("np-cover-full"), app.fullscreen, secs);
+        let full = ui.ctx().animate_bool_with_time(egui::Id::unique("np-cover-full"), app.fullscreen, secs / theme::anim_speed());
         let p = theme::ease_out(if app.fullscreen { full } else { 1.0 - full });
         if let Some([from, _]) = step {
             opening *= egui::lerp(from..=1.0, p);
@@ -1130,10 +1225,10 @@ fn cover_column(app: &mut App, ui: &mut Ui, col: Rect, track: &crate::model::Tra
         }
     }
     let window_h = ui.ctx().content_rect().height();
-    let art = Rect::from_center_size(pos2(col.center().x, col.top() + side / 2.0 + (col.height() - side - 110.0).max(0.0) * 0.35), Vec2::splat(side)).translate(vec2(cs.offset_vh[0], cs.offset_vh[1]) * window_h + {
-        let [x, y] = fs.padding.unwrap_or(cs.padding);
-        vec2(x, y)
-    });
+    let [pad_x, pad_y] = fs.padding.unwrap_or(cs.padding);
+    let shift = (vec2(cs.offset_vh[0], cs.offset_vh[1]) * window_h + vec2(pad_x, pad_y)) * free;
+    let center_y = col.top() + side / 2.0 + (col.height() - side - 110.0).max(0.0) * 0.35 * free;
+    let art = Rect::from_center_size(pos2(col.center().x, center_y), Vec2::splat(side)).translate(shift);
     let art = Rect::from_center_size(art.center(), art.size() * opening).translate(vec2(cs.open_slide * side * (1.0 - opened), settling * window_h));
     if cs.open_fade {
         ui.multiply_opacity(opened.clamp(0.0, 1.0));
@@ -1262,6 +1357,8 @@ fn cover_column(app: &mut App, ui: &mut Ui, col: Rect, track: &crate::model::Tra
         ui.painter().rect_filled(line, 2.0, theme::with_alpha(Color32::WHITE, 0.25));
         if total > 0.0 {
             ui.painter().rect_filled(Rect::from_min_size(line.min, vec2(line.width() * pos / total, 4.0)), 2.0, Color32::WHITE);
+            super::ab_loop::paint_loop(app, ui, line, total, pos, 2.0, Color32::WHITE);
+            super::ab_loop::loop_menu(app, ui, &seek, line, total, pos);
             if seek.clicked()
                 && let Some(p) = seek.interact_pointer_pos()
             {
@@ -1351,7 +1448,7 @@ fn cover_column(app: &mut App, ui: &mut Ui, col: Rect, track: &crate::model::Tra
         // A brief note, faded out after a few seconds.
         let since = ui.ctx().memory_mut(|m| *m.data.get_temp_mut_or_insert_with(egui::Id::unique(("no-lyrics", &track.id)), || now));
         let nl = np.no_lyrics;
-        let a = if nl.stays { 1.0 } else { (1.0 - ((now - since - 3.0) / 1.0) as f32).clamp(0.0, 1.0) };
+        let a = if nl.stays { 1.0 } else { (1.0 - ((now - since - 3.0) / theme::secs(1.0)) as f32).clamp(0.0, 1.0) };
         if a > 0.0 {
             let c = theme::with_alpha(theme::text_dim(), a * 0.8);
             let y = title_y + title_px * 1.4 + artist_px * 1.6;
@@ -1433,7 +1530,7 @@ fn video_stage(app: &mut App, ui: &mut Ui, content: Rect, track: &crate::model::
     // Up next or Comments: beside the video, or under it when there's no room.
     let comments = app.np_tab == NpTab::Comments && app.show_comments;
     let side = app.np_tab == NpTab::UpNext || comments;
-    let queue_w = if side && content.width() > 900.0 { 360.0 } else { 0.0 };
+    let queue_w = if side && content.width() > 900.0 && !portrait_layout(ui.ctx(), content) { 360.0 } else { 0.0 };
     let queue_h = if side && queue_w == 0.0 { content.height() * 0.45 } else { 0.0 };
     let stage = Rect::from_min_max(content.min, pos2(content.right() - queue_w, content.bottom() - queue_h));
     let (w, h) = frame.as_ref().map_or((16.0, 9.0), |t| (t.size()[0] as f32, t.size()[1] as f32));
@@ -1553,6 +1650,8 @@ fn seek_line(app: &mut App, ui: &mut Ui, hit: Rect, id: egui::Id, (pos, total): 
     let frac = if total > 0.0 { pos / total } else { 0.0 };
     let filled = Rect::from_min_size(track_r.min, vec2(track_r.width() * frac, thick));
     ui.painter().rect_filled(filled, thick / 2.0, fill);
+    super::ab_loop::paint_loop(app, ui, track_r, total, pos, thick / 2.0, Color32::WHITE);
+    super::ab_loop::loop_menu(app, ui, &seek, track_r, total, pos);
     if lit > 0.0 && total > 0.0 {
         ui.painter().circle_filled(pos2(filled.right(), line_y), 6.5 * lit, fill);
         if let Some(p) = seek.hover_pos() {
@@ -1567,10 +1666,11 @@ fn seek_line(app: &mut App, ui: &mut Ui, hit: Rect, id: egui::Id, (pos, total): 
         && let Some(p) = seek.interact_pointer_pos()
     {
         let t = ((p.x - track_r.left()) / track_r.width()).clamp(0.0, 1.0) * total;
-        if seek.dragged() {
+        // Dragged with the left button: a right-click held or moved a little is the menu's.
+        if seek.dragged_by(egui::PointerButton::Primary) {
             app.seek_drag = Some(t);
         }
-        if seek.drag_stopped() || seek.clicked() {
+        if seek.drag_stopped_by(egui::PointerButton::Primary) || seek.clicked() {
             app.seek_drag = None;
             app.actions.push(Action::Seek(t));
         }
@@ -1761,14 +1861,58 @@ fn video_line_pill(app: &App, ui: &Ui, picture: Rect) {
     // As the lyrics panel has it: what's audible, on the listener's timing.
     let pos = app.audio.status.position_smooth().as_secs_f64() - app.audio.status.latency().as_secs_f64();
     let t = ((pos - app.lyric_prefs.offset(id, lyrics.provider, lyrics.sync == Sync::Word)) * 1000.0) as i32;
-    let Some(line) = lyrics.lines.iter().find(|l| !l.instrumental && l.start <= t && t < l.start + l.dur) else { return };
-    let g = widgets::galley(ui, &line.text, theme::semibold(15.0), Color32::WHITE, picture.width() - 64.0);
-    let r = Rect::from_center_size(pos2(picture.center().x, picture.bottom() - 34.0), g.size() + vec2(24.0, 12.0));
-    if let Some(look) = app.look().app.glass.resume {
-        crate::shader::frost(ui.painter(), r, crate::shader::Frost { look, radius: r.height() / 2.0, opacity: 1.0, fade: 0.0 });
+    let pill = |size: Vec2| {
+        let r = Rect::from_center_size(pos2(picture.center().x, picture.bottom() - 34.0), size + vec2(24.0, 12.0));
+        if let Some(look) = app.look().app.glass.resume {
+            crate::shader::frost(ui.painter(), r, crate::shader::Frost { look, radius: r.height() / 2.0, opacity: 1.0, fade: 0.0 });
+        }
+        ui.painter().rect_filled(r, r.height() / 2.0, theme::shade(0.45));
+        r.center() - size / 2.0
+    };
+    if let Some(line) = lyrics.lines.iter().find(|l| !l.instrumental && l.start <= t && t < l.start + l.dur) {
+        let g = widgets::galley(ui, &line.text, theme::semibold(15.0), Color32::WHITE, picture.width() - 64.0);
+        ui.painter().galley(pill(g.size()), g, Color32::WHITE);
+        return;
     }
-    ui.painter().rect_filled(r, r.height() / 2.0, theme::shade(0.45));
-    ui.painter().galley(r.center() - g.size() / 2.0, g, Color32::WHITE);
+    // After the last line, Unison's credit, as the lyrics panel has under it.
+    let Some(c) = &lyrics.unison else { return };
+    if !lyrics.lines.iter().rev().find(|l| !l.instrumental).is_some_and(|l| t >= l.end()) {
+        return;
+    }
+    let parts = karaoke::unison_parts(c);
+    let (color, dim) = (theme::with_alpha(Color32::WHITE, 0.85), theme::with_alpha(Color32::WHITE, 0.55));
+    let parts: Vec<_> = parts.into_iter().map(|(text, url)| (widgets::galley(ui, &text, theme::regular(11.0), color, f32::INFINITY), url)).collect();
+    let mut at = pill(vec2(parts.iter().map(|(g, _)| g.size().x).sum(), parts[0].0.size().y));
+    for (n, (g, url)) in parts.into_iter().enumerate() {
+        let r = Rect::from_min_size(at, g.size());
+        at.x += g.size().x;
+        let mut tint = dim;
+        if let Some(url) = url {
+            let resp = ui.interact(r, ui.scope_id().with(("pill-unison", n)), Sense::click());
+            // Announced as the link it is, as the lyrics panel's are.
+            resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Link, true, g.text()));
+            if resp.hovered() {
+                tint = color;
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                ui.painter().hline(r.x_range(), r.bottom(), egui::Stroke::new(1.0, color));
+            }
+            if resp.clicked() {
+                ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+            }
+        }
+        ui.painter().galley_with_override_text_color(r.min, g, tint);
+    }
+}
+
+/// A new frame into a texture that's shown frame after frame. The same size, it's written
+/// into the texture's storage; `set` would have the GPU driver make that anew for every
+/// frame, which some keep the old storage of while frames in flight use it (#107, #324).
+fn overwrite(tex: &mut egui::TextureHandle, image: egui::ColorImage) {
+    if tex.size() == image.size {
+        tex.set_partial([0, 0], image, egui::TextureOptions::LINEAR);
+    } else {
+        tex.set(image, egui::TextureOptions::LINEAR);
+    }
 }
 
 /// The video's colours, eased toward the latest frame's, across all of Now playing.
@@ -1783,7 +1927,7 @@ fn paint_glow(app: &mut App, ui: &mut Ui, rect: Rect, clip: Rect) {
     }
     let [w, h] = crate::video::GLOW_SIZE;
     let pixels = current.iter().map(|c| Color32::from_rgb(c[0] as u8, c[1] as u8, c[2] as u8)).collect();
-    tex.set(egui::ColorImage { size: [w, h], source_size: vec2(w as f32, h as f32), pixels }, egui::TextureOptions::LINEAR);
+    overwrite(tex, egui::ColorImage { size: [w, h], source_size: vec2(w as f32, h as f32), pixels });
     // Bigger than the view, so its coarse edges stay out of sight.
     let full = rect.expand2(rect.size() * 0.08);
     let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
@@ -1869,11 +2013,11 @@ fn cover_clip(app: &mut App, ctx: &egui::Context, track: &crate::model::Track, p
             recolour = app.clip_art.as_ref().is_some_and(|(id, _)| *id == c.id);
         }
         match &mut c.frame {
-            Some((tex, _)) => tex.set(f.image, egui::TextureOptions::LINEAR),
+            Some((tex, _)) => overwrite(tex, f.image),
             None => c.frame = Some((ctx.load_texture("cover-clip", f.image, egui::TextureOptions::LINEAR), now)),
         }
     }
-    let shown = c.frame.as_ref().map_or(0.0, |(_, at)| ((now - at) / 0.32).clamp(0.0, 1.0)) as f32;
+    let shown = c.frame.as_ref().map_or(0.0, |(_, at)| ((now - at) / theme::secs(0.32)).clamp(0.0, 1.0)) as f32;
     // Now playing runs at 30 fps while the music plays; paused, only the first frame and
     // its fade need drawing.
     if c.frame.is_none() {
@@ -1956,7 +2100,7 @@ pub(super) fn video_frame(app: &mut App, ctx: &egui::Context, track: &crate::mod
             }
         }
         match &mut app.video_frame {
-            Some(tex) => tex.set(frame.image, egui::TextureOptions::LINEAR),
+            Some(tex) => overwrite(tex, frame.image),
             None => app.video_frame = Some(ctx.load_texture("music-video", frame.image, egui::TextureOptions::LINEAR)),
         }
     }
@@ -1981,7 +2125,7 @@ fn lyrics_panel(app: &mut App, ui: &mut Ui, rect: Rect, now: f64, centered: bool
         });
         return;
     };
-    let hide_break_only = app.look().lyrics.hide_instrumental_only;
+    let hide_break_only = app.lyric_prefs.style(app.look()).hide_instrumental_only;
     if let Some(lyrics) = app.lyric_prefs.choose(&id, &set).and_then(|p| set.get(p)).filter(|l| !hide_break_only || !l.lines.iter().all(|x| x.instrumental)) {
         let panel = Rect::from_min_max(rect.min, pos2(rect.right(), rect.bottom() - 4.0));
         if lyrics.sync == Sync::None {
@@ -2041,7 +2185,7 @@ fn decorations<'a>(
 }
 
 fn synced(app: &mut App, ui: &mut Ui, rect: Rect, id: &str, lyrics: &Lyrics, now: f64, narrow: bool) {
-    let style = &app.look().lyrics;
+    let style = app.lyric_prefs.style(app.look());
     let accent = app.accent_color();
     let centered = narrow;
     let playing = app.playing();
@@ -2055,7 +2199,9 @@ fn synced(app: &mut App, ui: &mut Ui, rect: Rect, id: &str, lyrics: &Lyrics, now
         let mut h = std::collections::hash_map::DefaultHasher::new();
         id.hash(&mut h);
         lyrics.provider.key().hash(&mut h);
+        lyrics.unison.hash(&mut h);
         app.theme_id.hash(&mut h);
+        app.lyric_prefs.look.hash(&mut h);
                 for r in &roman {
             match r {
                 Some(karaoke::Roman::Timed(_, s)) | Some(karaoke::Roman::Text(s)) => s.hash(&mut h),
@@ -2065,14 +2211,14 @@ fn synced(app: &mut App, ui: &mut Ui, rect: Rect, id: &str, lyrics: &Lyrics, now
         trans.hash(&mut h);
         h.finish()
     };
-    let own = karaoke::Own { scale: app.lyric_prefs.text_scale, weight: app.lyric_prefs.weight, deco_scale: app.lyric_prefs.deco_scale };
+    let own = karaoke::Own { scale: app.lyric_prefs.text_scale, weight: app.lyric_prefs.weight, deco_scale: app.lyric_prefs.deco_scale, size: None, anchor: None, padding: None, ink: None, follow: false, active_row: false };
     let fullscreen = app.fullscreen;
     let glass_chip = app.look().app.glass.instrumental;
     let quick_scroll = app.quick_lyric_scroll;
-    let frame = karaoke::Frame { lyrics, key, roman, trans, t, playing, now, rect, style, accent, centered, own, fullscreen, glass_chip, quick_scroll };
+    let frame = karaoke::Frame { lyrics, key, roman, trans, t, playing, now, rect, style, accent, centered, own, fullscreen, glass_chip, quick_scroll, soft: false };
     // The view lives in `app`; the frame borrows `app` for decorations, so swap it out.
     let mut view = std::mem::take(&mut app.lyric_view);
-    let out = if karaoke::dev_off("view") { karaoke::Out { seek: None, animating: true, user_scrolling: false } } else { view.show(ui, frame) };
+    let out = if karaoke::dev_off("view") { karaoke::Out { seek: None, animating: true, user_scrolling: false, active_h: 0.0 } } else { view.show(ui, frame) };
     app.lyric_view = view;
     if let Some(s) = out.seek {
         // The line's time on the player's clock: `t` above, the other way round.
@@ -2145,7 +2291,7 @@ fn plain_lyrics(app: &mut App, ui: &mut Ui, rect: Rect, lyrics: &Lyrics) {
     egui::ScrollArea::vertical().id_salt("plain-lyrics").auto_shrink(false).show(&mut child, |ui| {
         ui.label(egui::RichText::new(crate::tr!("player-lyrics-unsynced")).font(theme::regular(13.0)).color(theme::text_faint()));
         ui.add_space(14.0);
-        let style = &app.look().lyrics;
+        let style = app.lyric_prefs.style(app.look());
         let size = style.plain_size().min(rect.width() / 14.0).max(18.0);
         for l in &lyrics.lines {
             let font = theme::lyric_font_for(&style.font, app.lyric_prefs.weight.unwrap_or(style.weight), size, &l.text);
@@ -2162,7 +2308,26 @@ fn plain_lyrics(app: &mut App, ui: &mut Ui, rect: Rect, lyrics: &Lyrics) {
             }
             ui.add_space(size * 0.25);
         }
+        if let Some(c) = &lyrics.unison {
+            ui.add_space(14.0);
+            unison_credit(ui, c);
+        }
         ui.add_space(80.0);
+    });
+}
+
+/// Unison's credit under its unsynced lyrics, as the synced view has it: "Lyrics from
+/// Unison" linked to the song there, and who submitted them linked to their page.
+fn unison_credit(ui: &mut Ui, c: &crate::lyrics::UnisonCredit) {
+    let text = |t: String| egui::RichText::new(t).font(theme::regular(11.5)).color(theme::text_faint());
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        for (part, url) in karaoke::unison_parts(c) {
+            match url {
+                Some(url) => ui.add(egui::Hyperlink::from_label_and_url(text(part), url)),
+                None => ui.label(text(part)),
+            };
+        }
     });
 }
 
@@ -2327,15 +2492,14 @@ fn submenu_row(ui: &mut Ui, label: &str, value: &str, dot: Option<Color32>, open
         ui.painter().circle_filled(pos2(value_x - 9.0, row.center().y), 3.0, c);
     }
     let value_pos = pos2(value_x, row.center().y - value_g.size().y / 2.0);
-    ui.painter().galley(value_pos, value_g.clone(), theme::text_dim());
-    widgets::tip_if_elided(ui, Rect::from_min_size(value_pos, value_g.size()), &value_g, value);
+    widgets::galley_tipped(ui, value_pos, value_g, theme::text_dim(), value);
     if opens {
         widgets::icon_at(ui, pos2(row.right() - 18.0, row.center().y), icon::CHEVRON_RIGHT, 14.0, theme::text_dim());
         egui::containers::menu::SubMenu::new().show(ui, &resp, contents);
     }
 }
 
-fn menu_caption(ui: &mut Ui, text: &str) {
+pub(super) fn menu_caption(ui: &mut Ui, text: &str) {
     let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 26.0), Sense::hover());
     ui.painter().text(pos2(r.left() + 12.0, r.center().y + 2.0), egui::Align2::LEFT_CENTER, text.to_uppercase(), theme::semibold(11.0), theme::text_faint());
 }
@@ -2417,7 +2581,76 @@ fn mini_text(ui: &mut Ui, text: &str, on: bool, tip: &str) -> egui::Response {
 
 #[cfg(test)]
 mod tests {
-    use super::lyrics_panel_wanted;
+    use super::{is_portrait, lyrics_panel_wanted, overwrite};
+    use egui::{Vec2, vec2};
+
+    /// Now playing's content in a window of `w`×`h` points: its padding, header and the
+    /// player bar taken off. Snapped sizes leave out a 48-point taskbar.
+    fn content(w: f32, h: f32) -> Vec2 {
+        vec2(w - 64.0, h - 154.0)
+    }
+
+    #[test]
+    fn half_a_landscape_screen_stays_side_by_side() {
+        for (w, h) in [
+            (960.0, 1032.0),  // 1080p
+            (1280.0, 1392.0), // 1440p, and 4K at 150 %
+            (1920.0, 2112.0), // 4K at 100 %
+            (960.0, 1152.0),  // 1920×1200
+            (1280.0, 1552.0), // 2560×1600
+            (1128.0, 1456.0), // 3:2, 2256×1504
+            (1920.0, 2512.0), // 3:2, 3840×2560 at 100 %
+            (1536.0, 2000.0), // 3:2, 3840×2560 at 125 %
+            (1720.0, 1392.0), // 3440×1440 ultrawide
+            (1146.0, 1392.0), // a third of it
+        ] {
+            // Even coming from a taller window.
+            assert!(!is_portrait(content(w, h), false) && !is_portrait(content(w, h), true), "{w}×{h}");
+        }
+    }
+
+    #[test]
+    fn portrait_monitors_and_tall_windows_stack() {
+        for (w, h) in [
+            (1080.0, 1872.0), // 1080×1920
+            (864.0, 1488.0),  // 1080×1920 at 125 %
+            (1440.0, 2512.0), // 1440×2560
+            (1200.0, 1872.0), // 1200×1920
+            (960.0, 1392.0),  // a 2880×1920 tablet stood up, at 200 %
+            (960.0, 1659.0),  // 1440×2560 at 150 %
+            (853.0, 1392.0),  // a third of a 1440p screen
+        ] {
+            assert!(is_portrait(content(w, h), false), "{w}×{h}");
+        }
+    }
+
+    #[test]
+    fn near_the_line_it_keeps_what_it_was() {
+        let c = vec2(1000.0, 1320.0);
+        assert!(is_portrait(c, true));
+        assert!(!is_portrait(c, false));
+    }
+
+    /// A frame the texture's size is written into it; another size makes it anew.
+    #[test]
+    fn a_same_size_frame_overwrites_its_texture() {
+        let ctx = egui::Context::default();
+        let img = |w, h| egui::ColorImage::filled([w, h], egui::Color32::RED);
+        let mut tex = ctx.load_texture("t", img(4, 4), egui::TextureOptions::LINEAR);
+        let id = tex.id();
+        let pos = |ctx: &egui::Context| {
+            let mut delta = ctx.tex_manager().write().take_delta();
+            let pos = delta.set.get(&id).and_then(|d| d.last()).map(|d| d.pos);
+            delta.clear();
+            pos
+        };
+        pos(&ctx);
+        overwrite(&mut tex, img(4, 4));
+        assert_eq!(pos(&ctx), Some(Some([0, 0])));
+        overwrite(&mut tex, img(8, 4));
+        assert_eq!(pos(&ctx), Some(None));
+        assert_eq!(tex.size(), [8, 4]);
+    }
 
     #[test]
     fn lyrics_panel_holds_state_while_loading_and_tracks_lyrics_availability() {

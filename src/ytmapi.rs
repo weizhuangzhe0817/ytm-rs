@@ -68,7 +68,7 @@ struct Unavailable;
 
 impl std::fmt::Display for Unavailable {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("YouTube Music isn't available where your proxy connects from. Try another proxy or server (Settings › Network)")
+        f.write_str(crate::tr!("backend-proxy-region"))
     }
 }
 
@@ -355,10 +355,10 @@ impl Api {
     /// another sign-in since has other channels. The new epoch.
     pub fn switch_channel(&self, page_id: Option<String>, epoch: u64) -> anyhow::Result<u64> {
         let mut slot = self.account.write().unwrap();
-        anyhow::ensure!(self.epoch() == epoch, "The account changed meanwhile; pick the channel again");
+        anyhow::ensure!(self.epoch() == epoch, crate::tr!("backend-channel-account-changed"));
         let next = slot.as_ref().ok_or_else(|| anyhow::anyhow!("sign in first"))?.on_channel(page_id);
         // Not switched unless it's kept: the next launch would be on the old channel.
-        anyhow::ensure!(self.file.parent().is_some_and(|dir| next.save(dir)), "Couldn't save the channel choice");
+        anyhow::ensure!(self.file.parent().is_some_and(|dir| next.save(dir)), crate::tr!("backend-channel-not-saved"));
         *slot = Some(Arc::new(next));
         Ok(self.epoch.fetch_add(1, Relaxed) + 1)
     }
@@ -560,9 +560,10 @@ pub struct ApiError {
 impl std::fmt::Display for ApiError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match (self.status, self.msg.is_empty()) {
-            (401, _) => f.write_str("YouTube Music signed this session out; sign in again"),
-            (_, true) => write!(f, "YouTube Music returned HTTP {}", self.status),
-            (_, false) => write!(f, "YouTube Music returned HTTP {}: {}", self.status, self.msg),
+            (401, _) => f.write_str(crate::tr!("backend-signed-out")),
+            // A string, so it isn't written as a number of the language (with separators).
+            (_, true) => f.write_str(&crate::tr!("backend-http-status", status = self.status.to_string())),
+            (_, false) => f.write_str(&crate::tr!("backend-http-status-message", status = self.status.to_string(), message = self.msg.as_str())),
         }
     }
 }
@@ -574,6 +575,12 @@ fn is_retryable(e: &anyhow::Error) -> bool {
         Some(a) => a.status == 400 || a.status == 403 || a.status == 429 || a.status >= 500,
         None => e.downcast_ref::<reqwest::Error>().is_some_and(|r| r.is_timeout() || r.is_connect()),
     }
+}
+
+/// Whether music.youtube.com answers at all through `http`, whatever it says: what
+/// `Req::Reachable` asks. Quick, so a check while offline doesn't hang about.
+pub async fn reachable(http: &reqwest::Client) -> bool {
+    http.head(ORIGIN).timeout(Duration::from_secs(5)).send().await.is_ok()
 }
 
 /// Whether music.youtube.com is offered through `http`: its "not available in your

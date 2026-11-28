@@ -1,5 +1,11 @@
-### Player controls and synced lyrics.
+### The player: the bar along the bottom, now playing and the mini player.
 
+# For screen readers, on the time beside the progress line ("0:36 / 1:27"), which a
+# click switches to the time left ("-0:51 / 1:27") and back. { $time } is the time as shown.
+player-time-show-left = { $time }. Pokaż pozostały czas
+player-time-show-length = { $time }. Pokaż długość utworu
+
+# From the interface-wide catalog (#228).
 player-full-screen = Pełny ekran
 player-exit-full-screen = Opuść pełny ekran
 player-pip = Obraz w obrazie
@@ -19,6 +25,8 @@ player-sync-none = Bez synchronizacji
 player-lyrics-source = Źródło tekstu
 player-only-lyrics-source = Źródło tekstu · znaleziono tylko jedno
 player-lyrics-source-name = Źródło tekstu: { $name }
+player-lyrics-from-unison = Tekst z Unison
+player-lyrics-submitted-by = dodane przez { $name }
 player-timing = Synchronizacja
 player-lyrics-later = Opóźnij tekst (+0,1 s)
 player-lyrics-earlier = Przyspiesz tekst (−0,1 s)
@@ -49,3 +57,7 @@ player-play-next = Odtwórz jako następny
 player-start-radio = Uruchom radio
 player-go-to-album = Przejdź do albumu
 player-go-to-artist = Przejdź do wykonawcy
+player-sleep-timer = Wyłącznik czasowy
+player-sleep-off = Wył.
+player-sleep-minutes = { $minutes } min
+player-sleep-song-end = Koniec utworu

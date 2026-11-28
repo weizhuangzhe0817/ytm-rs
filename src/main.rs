@@ -18,6 +18,7 @@ mod bidi;
 mod cache;
 mod canvas;
 mod deeplink;
+mod destination;
 mod discord;
 mod downloads;
 mod hotkeys;
@@ -26,7 +27,11 @@ mod jam;
 mod innertube;
 mod jsc;
 mod lastfm;
+mod scrobble_store;
+#[cfg(test)]
+mod scrobble_tests;
 mod login;
+mod link;
 mod listenbrainz;
 mod locale;
 mod lyrics;
@@ -90,9 +95,9 @@ fn main() -> eframe::Result {
     // Child-process modes for the webview windows (see login.rs / turnstile.rs).
     let mut args = std::env::args_os().skip(1);
     if let (Some(flag), Some(dir)) = (args.next(), args.next()) {
-        // The parent hands its proxy setting down through the environment.
-        proxy::init(std::path::Path::new(""));
         if flag == login::FLAG || flag == login::SPOTIFY_FLAG || flag == turnstile::FLAG {
+            // The parent hands its proxy setting down through the environment.
+            proxy::init(std::path::Path::new(""));
             let language = args.next().and_then(|arg| arg.into_string().ok());
             i18n::init(language.as_deref());
         }
@@ -177,10 +182,20 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
 
+    // Set once the window and GPU context are up: a GL error after that (a failed
+    // `swap_buffers` an hour in) isn't one at start-up and shouldn't switch renderers.
+    let started = std::cell::Cell::new(false);
     let run = eframe::run_native(
         "ytm-rs",
         options,
         Box::new(|cc| {
+            started.set(true);
+            // The fallback drew: keep it, as a wgpu failure keeps OpenGL, so later launches
+            // don't fail on OpenGL first and Settings shows what's in use.
+            if renderer::retrying() && cc.wgpu_render_state.is_some() {
+                log::info!("renderer: {} works where OpenGL didn't; keeping it", renderer::api_name());
+                let _ = renderer::save(&data_dir(), renderer::Renderer::Wgpu);
+            }
             let language = cc.storage.and_then(|storage| storage.get_string("language")).filter(|l| !l.is_empty());
             // Set the locale before any background work can format its first message.
             i18n::init(language.as_deref());
@@ -225,9 +240,9 @@ fn main() -> eframe::Result {
             // Dev hook: YTM_MUTE starts silent and never persists the volume.
             let volume = if std::env::var_os("YTM_MUTE").is_some() { 0.0 } else { volume };
 
-            let device = cc.storage.and_then(|s| s.get_string("output_device")).filter(|d| !d.is_empty());
-            // Before the audio engine, which looks for a picked AirPlay speaker if it may.
-            airplay::set_allowed(cc.storage.and_then(|s| s.get_string("local_network")).is_some_and(|v| v == "1"));
+            let device = destination::Destination::parse(&cc.storage.and_then(|s| s.get_string("output_device")).unwrap_or_default());
+            // Before the audio engine, which looks for picked network speakers if it may.
+            destination::set_allowed(cc.storage.and_then(|s| s.get_string("local_network")).is_some_and(|v| v == "1"));
 
             let (audio_tx, audio_rx) = unbounded();
             let audio = audio::spawn(volume, log_volume, device, audio_tx, wake);
@@ -300,11 +315,36 @@ fn main() -> eframe::Result {
             )))
         }),
     );
-    // A wgpu window that won't open would fail the same way at every launch: go back
-    // to OpenGL for the next one.
-    if run.is_err() && renderer == renderer::Renderer::Wgpu {
-        log::error!("renderer: {} failed to start; switching back to OpenGL", renderer::api_name());
-        let _ = renderer::save(&data_dir(), renderer::Renderer::OpenGl);
+    if let Err(error) = &run {
+        match renderer {
+            renderer::Renderer::Wgpu if renderer::retrying() => {
+                log::error!("renderer: {} fallback failed: {error}", renderer::api_name());
+            }
+            // A wgpu window that won't open would fail the same way at every launch: go
+            // back to OpenGL for the next one.
+            renderer::Renderer::Wgpu => {
+                log::error!("renderer: {} failed to start; switching back to OpenGL", renderer::api_name());
+                let _ = renderer::save(&data_dir(), renderer::Renderer::OpenGl);
+            }
+            // Start a fresh process: eframe's event loop and GPU state cannot be reset
+            // after a failed OpenGL startup.
+            renderer::Renderer::OpenGl if !started.get()
+                && !renderer::retrying()
+                && matches!(error, eframe::Error::Glutin(_) | eframe::Error::NoGlutinConfigs(..) | eframe::Error::OpenGL(_))
+                && renderer::available() =>
+            {
+                log::warn!("renderer: OpenGL failed to start ({error}); trying {}", renderer::api_name());
+                // Pass on this launch's arguments, such as a jam link waiting to be joined.
+                let args = renderer::retry_args(std::env::args_os().skip(1));
+                let args: Vec<&str> = args.iter().map(String::as_str).collect();
+                if let Ok(exe) = std::env::current_exe()
+                    && update::start_after_exit_with_args(&exe, &args)
+                {
+                    return Ok(());
+                }
+            }
+            _ => {}
+        }
     }
     run
 }

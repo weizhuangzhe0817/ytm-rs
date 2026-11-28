@@ -1,5 +1,11 @@
-### Player controls and synced lyrics.
+### The player: the bar along the bottom, now playing and the mini player.
 
+# For screen readers, on the time beside the progress line ("0:36 / 1:27"), which a
+# click switches to the time left ("-0:51 / 1:27") and back. { $time } is the time as shown.
+player-time-show-left = { $time }。显示剩余时间
+player-time-show-length = { $time }。显示歌曲长度
+
+# From the interface-wide catalog (#228).
 player-full-screen = 全屏
 player-exit-full-screen = 退出全屏
 player-pip = 画中画
@@ -19,6 +25,8 @@ player-sync-none = 未同步
 player-lyrics-source = 歌词来源
 player-only-lyrics-source = 歌词来源·仅找到一首
 player-lyrics-source-name = 歌词来源：{ $name }
+player-lyrics-from-unison = 来自 Unison 的歌词
+player-lyrics-submitted-by = 由 { $name } 提交
 player-timing = 时机
 player-lyrics-later = 稍后歌词（+0.1 秒）
 player-lyrics-earlier = 较早的歌词（−0.1 秒）
@@ -49,3 +57,7 @@ player-play-next = 播放下一个
 player-start-radio = 开始广播
 player-go-to-album = 前往相册
 player-go-to-artist = 前往艺术家
+player-sleep-timer = 睡眠定时器
+player-sleep-off = 关闭
+player-sleep-minutes = { $minutes } 分钟
+player-sleep-song-end = 歌曲结束时

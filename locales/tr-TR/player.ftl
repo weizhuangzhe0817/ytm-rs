@@ -1,5 +1,11 @@
-### Player controls and synced lyrics.
+### The player: the bar along the bottom, now playing and the mini player.
 
+# For screen readers, on the time beside the progress line ("0:36 / 1:27"), which a
+# click switches to the time left ("-0:51 / 1:27") and back. { $time } is the time as shown.
+player-time-show-left = { $time }. Kalan süreyi göster
+player-time-show-length = { $time }. Şarkı süresini göster
+
+# From the interface-wide catalog (#228).
 player-full-screen = Tam ekran
 player-exit-full-screen = Tam ekrandan çık
 player-pip = Resim içinde resim
@@ -19,6 +25,8 @@ player-sync-none = Senkronize edilmedi
 player-lyrics-source = Şarkı sözü kaynağı
 player-only-lyrics-source = Şarkı sözü kaynağı · yalnızca bir tane bulundu
 player-lyrics-source-name = Şarkı sözü kaynağı: { $name }
+player-lyrics-from-unison = Unison şarkı sözleri
+player-lyrics-submitted-by = { $name } tarafından gönderildi
 player-timing = Zamanlama
 player-lyrics-later = Şarkı sözleri daha sonra (+0,1 sn)
 player-lyrics-earlier = Şarkı sözleri daha erken (−0,1 sn)
@@ -49,3 +57,7 @@ player-play-next = Sıradakini oynat
 player-start-radio = Radyoyu başlat
 player-go-to-album = Albüme git
 player-go-to-artist = Sanatçıya git
+player-sleep-timer = Uyku zamanlayıcısı
+player-sleep-off = Kapalı
+player-sleep-minutes = { $minutes } dk
+player-sleep-song-end = Şarkının sonu

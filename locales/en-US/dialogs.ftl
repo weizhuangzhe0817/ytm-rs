@@ -9,6 +9,7 @@ dialog-delete-upload-title = Delete upload?
 dialog-delete-upload = Delete upload
 dialog-name = Name
 dialog-my-playlist = My playlist
+dialog-search-playlists = Search your playlists
 dialog-private-desc = Private · only you can see it
 dialog-playlist-name = Playlist name
 dialog-description = Description
@@ -35,5 +36,20 @@ dialog-delete-playlist-body = “{ $title }” will be removed from your YouTube
 dialog-delete-upload-body = “{ $title }” is deleted from your YouTube Music uploads. This can't be undone.
 dialog-download-count = Download ({ $count })
 dialog-edit-playlist = Edit playlist
+dialog-picture = Picture
+dialog-change-picture = Change picture
+dialog-remove-picture = Remove
 dialog-download-body = Tracks left to download: { $count }. Downloads run in the background and start with the current track.
 dialog-download-collection-body = Tracks left to download from “{ $title }”: { $count }. Downloads run in the background and start with the current track.
+dialog-add-duplicates-title = Already in the playlist
+dialog-add-duplicates-some = Some of these songs are already in “{ $title }”. Add them anyway?
+dialog-add-duplicates-body =
+    { $count ->
+        [one] “{ $songs }” is already in “{ $title }”. Add it anyway?
+       *[other] { $more ->
+            [0] These { $count } songs are already in “{ $title }”: { $songs }. Add them anyway?
+           *[other] These { $count } songs are already in “{ $title }”: { $songs } and { $more } more. Add them anyway?
+        }
+    }
+dialog-add-anyway = Add anyway
+dialog-skip-duplicates = Skip duplicates

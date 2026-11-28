@@ -2,11 +2,12 @@
 
 use egui::{Color32, Ui};
 
-use crate::backend::Req;
+use crate::backend::{CoverChange, Req};
 use crate::model::Target;
 use crate::theme;
+use crate::ytm::Duplicates;
 
-use super::{Action, App, Dialog, Page, BackupPrompt, notes, pages, widgets};
+use super::{Action, App, Dialog, NewCover, Page, BackupPrompt, notes, pages, widgets};
 
 impl App {
     pub(super) fn draw_dialog(&mut self, ctx: &egui::Context) {
@@ -63,25 +64,42 @@ impl App {
         let accent = self.accent_color();
         let mut done = false;
         let heading = match &dialog {
-            Dialog::PickPlaylist(_) => crate::tr!("ui-add-playlist"),
+            Dialog::PickPlaylist { .. } => crate::tr!("ui-add-playlist"),
             Dialog::NewPlaylist { .. } => crate::tr!("ui-new-playlist"),
             Dialog::EditPlaylist { .. } => crate::tr!("dialog-edit-playlist"),
             Dialog::ConfirmDelete { .. } => crate::tr!("dialog-delete-playlist"),
             Dialog::ConfirmDeleteUpload { .. } => crate::tr!("dialog-delete-upload"),
             Dialog::ConfirmClearCache => crate::tr!("settings-clear-cache"),
             Dialog::ConfirmDownload { .. } => crate::tr!("settings-download"),
+            Dialog::ConfirmAddDuplicates { .. } => crate::tr!("dialog-add-duplicates-title"),
             Dialog::Collaborate { .. } => crate::tr!("ui-collaborate"),
         };
+        // A distinct area id per dialog kind. egui keeps an area's previous size when its
+        // content shrinks, so a small dialog opened after a big one (the duplicates
+        // question after "Add to playlist") would otherwise get the stale, taller rect
+        // and draw with a large empty gap below its buttons.
+        let modal_id = egui::Id::unique((
+            "playlist-dialog",
+            match &dialog {
+                Dialog::PickPlaylist { .. } => 0,
+                Dialog::NewPlaylist { .. } => 1,
+                Dialog::EditPlaylist { .. } => 2,
+                Dialog::ConfirmAddDuplicates { .. } => 3,
+                Dialog::ConfirmDownload { .. } => 4,
+                Dialog::Collaborate { .. } => 5,
+                Dialog::ConfirmDelete { .. } | Dialog::ConfirmDeleteUpload { .. } | Dialog::ConfirmClearCache => 6,
+            },
+        ));
         // The same modal card as "Delete playlist?" and the update dialog.
-        widgets::modal_extras(ctx, egui::Id::unique("playlist-dialog"));
-        let modal = egui::Modal::new(egui::Id::unique("playlist-dialog")).frame(notes::surface()).backdrop_color(theme::shade(0.55)).show(ctx, |ui| {
+        widgets::modal_extras(ctx, modal_id);
+        let modal = egui::Modal::new(modal_id).frame(notes::surface()).backdrop_color(theme::shade(0.55)).show(ctx, |ui| {
             ui.set_width(440.0_f32.min(ctx.content_rect().width() - 48.0));
             egui::Frame::new().inner_margin(egui::Margin { left: 26, right: 26, top: 24, bottom: 22 }).show(ui, |ui| {
                 ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
                 ui.label(egui::RichText::new(heading).font(theme::bold(22.0)).color(theme::text()));
                 ui.add_space(18.0);
                 match &mut dialog {
-                    Dialog::PickPlaylist(tracks) => {
+                    Dialog::PickPlaylist { tracks, query } => {
                         if dialog_row(ui, None, Some(theme::icon::LIST_PLUS), crate::tr!("ui-new-playlist")) {
                             self.actions.push(Action::NewPlaylist(tracks.clone()));
                             done = true;
@@ -91,17 +109,31 @@ impl App {
                         ui.add_space(6.0);
                         let cards = self.library.as_ref().map(|l| l.playlists.clone()).unwrap_or_default();
                         let order = super::collections::pinned_first(&self.pinned, &cards, 0..cards.len());
-                        egui::ScrollArea::vertical().max_height(340.0).auto_shrink([false, true]).show(ui, |ui| {
+                        let changed = search_field(ui, query);
+                        ui.add_space(6.0);
+                        let mut shown = 0;
+                        // As tall as the list, up to 340: the modal's last size caps the room
+                        // the list gets, so without a floor it stays one row high after a search.
+                        let mut list = egui::ScrollArea::vertical().max_height(340.0).min_scrolled_height(340.0).auto_shrink([false, true]);
+                        if changed { list = list.vertical_scroll_offset(0.0); }
+                        list.show(ui, |ui| {
                             for card in order.into_iter().map(|i| &cards[i]) {
                                 if let Target::Playlist(id) = &card.target {
-                                    if !id.starts_with("PL") { continue; }
-                                    if dialog_row(ui, Some(&card.thumbs), None, &card.title) {
-                                        self.add_to_playlist(id.clone(), tracks);
+                                    if !id.starts_with("PL") || !(query.trim().is_empty() || super::find::has_words(&card.title, query)) { continue; }
+                                    shown += 1;
+                                    // Keyed by playlist, so a row the list shifts under a press
+                                    // isn't clicked in its place.
+                                    if ui.push_id(id, |ui| dialog_row(ui, Some(&card.thumbs), None, &card.title)).inner {
+                                        self.add_to_playlist(id.clone(), tracks, Duplicates::Ask);
                                         done = true;
                                     }
                                 }
                             }
                         });
+                        if shown == 0 && !query.trim().is_empty() {
+                            ui.add_space(10.0);
+                            ui.label(egui::RichText::new(crate::tr!("nav-no-results")).font(theme::regular(14.0)).color(theme::text_dim()));
+                        }
                     }
                     Dialog::NewPlaylist { title, tracks } => {
                         let name = text_field(ui, crate::tr!("dialog-name"), title, false, crate::tr!("dialog-my-playlist"));
@@ -110,14 +142,37 @@ impl App {
                         ui.label(egui::RichText::new(crate::tr!("dialog-private-desc")).font(theme::regular(12.5)).color(theme::text_faint()));
                         ui.add_space(24.0);
                         let enter = name.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                        let (ok, cancel) = dialog_buttons(ui, crate::tr!("ui-create"), !title.trim().is_empty(), accent);
+                        let (ok, _, cancel) = dialog_buttons(ui, crate::tr!("ui-create"), None, !title.trim().is_empty(), accent);
                         if (ok || enter) && !title.trim().is_empty() {
                             self.backend.request(Req::CreatePlaylist { title: title.trim().to_owned(), video_ids: tracks.iter().map(|t| t.id.clone()).collect() });
                             done = true;
                         }
                         done |= cancel;
                     }
-                    Dialog::EditPlaylist { id, title, description, privacy } => {
+                    Dialog::EditPlaylist { id, title, description, privacy, thumbs, cover } => {
+                        let picked = {
+                            let mut slot = self.picked_cover.lock().unwrap();
+                            if slot.as_ref().is_some_and(|(of, _)| of == id) { slot.take().map(|(_, r)| r) } else { None }
+                        };
+                        match picked {
+                            Some(Ok(jpeg)) => {
+                                let uri = format!("bytes://playlist-cover-{}.jpg", PICKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+                                if let Some(NewCover::Picked(old, _)) = cover.replace(NewCover::Picked(uri, jpeg.into())) { ui.ctx().forget_image(&old); }
+                            }
+                            Some(Err(e)) => {
+                                log::warn!("playlist picture: {e:#}");
+                                self.toast(crate::tr!("status-picture-unreadable"));
+                            }
+                            None => {}
+                        }
+                        match cover_picker(ui, thumbs, cover.as_ref()) {
+                            Some(CoverPick::Change) => self.pick_cover(ui.ctx(), id.clone()),
+                            Some(CoverPick::Remove) => {
+                                if let Some(NewCover::Picked(old, _)) = cover.replace(NewCover::Removed) { ui.ctx().forget_image(&old); }
+                            }
+                            None => {}
+                        }
+                        ui.add_space(16.0);
                         text_field(ui, crate::tr!("dialog-name"), title, false, crate::tr!("dialog-playlist-name"));
                         ui.add_space(16.0);
                         text_field(ui, crate::tr!("dialog-description"), description, true, crate::tr!("dialog-optional-description"));
@@ -125,9 +180,13 @@ impl App {
                         field_label(ui, crate::tr!("dialog-visibility"));
                         privacy_picker(ui, privacy);
                         ui.add_space(26.0);
-                        let (ok, cancel) = dialog_buttons(ui, crate::tr!("settings-save"), !title.trim().is_empty(), accent);
+                        let (ok, _, cancel) = dialog_buttons(ui, crate::tr!("settings-save"), None, !title.trim().is_empty(), accent);
                         if ok {
-                            self.backend.request(Req::EditPlaylist { id: id.clone(), title: title.trim().to_owned(), description: description.clone(), privacy: privacy.clone() });
+                            let cover = cover.as_ref().map(|c| match c {
+                                NewCover::Picked(_, jpeg) => CoverChange::Set(jpeg.to_vec()),
+                                NewCover::Removed => CoverChange::Remove,
+                            });
+                            self.backend.request(Req::EditPlaylist { id: id.clone(), title: title.trim().to_owned(), description: description.clone(), privacy: privacy.clone(), cover });
                             done = true;
                         }
                         done |= cancel;
@@ -140,12 +199,29 @@ impl App {
                         };
                         ui.add(egui::Label::new(egui::RichText::new(body).font(theme::regular(14.0)).color(theme::text_dim())).wrap());
                         ui.add_space(22.0);
-                        let (ok, cancel) = dialog_buttons(ui, &crate::tr!("dialog-download-count", count = *count), true, accent);
+                        let (ok, _, cancel) = dialog_buttons(ui, &crate::tr!("dialog-download-count", count = *count), None, true, accent);
                         if ok {
                             let (target, title, tracks) = (target.clone(), title.clone(), Some(std::mem::take(tracks)));
                             self.backend.request(Req::DownloadMany { target, title, tracks, confirmed: true });
                         }
                         done = ok || cancel;
+                    }
+                    Dialog::ConfirmAddDuplicates { playlist_id, playlist_title, tracks, duplicates } => {
+                        let body = duplicates_body(playlist_title, duplicates);
+                        ui.add(egui::Label::new(egui::RichText::new(body).font(theme::regular(14.0)).color(theme::text_dim())).wrap());
+                        ui.add_space(22.0);
+                        // Of several songs, adding just the new ones is the likely answer.
+                        let (add, skip, cancel) = if tracks.len() > 1 {
+                            let (skip, add, cancel) = dialog_buttons(ui, crate::tr!("dialog-skip-duplicates"), Some(crate::tr!("dialog-add-anyway")), true, accent);
+                            (add, skip, cancel)
+                        } else {
+                            dialog_buttons(ui, crate::tr!("dialog-add-anyway"), None, true, accent)
+                        };
+                        if add || skip {
+                            let how = if add { Duplicates::Add } else { Duplicates::Skip };
+                            self.add_to_playlist(playlist_id.clone(), tracks, how);
+                        }
+                        done = add || skip || cancel;
                     }
                     Dialog::Collaborate { info, busy, confirm_off, .. } => done = self.collaborate_dialog(ui, info, busy, confirm_off, accent),
                     Dialog::ConfirmDelete { .. } | Dialog::ConfirmDeleteUpload { .. } | Dialog::ConfirmClearCache => unreachable!("drawn by confirm"),
@@ -153,7 +229,11 @@ impl App {
             });
         });
         let dismissed = modal.should_close() || ctx.input(|i| i.key_pressed(egui::Key::Escape));
-        if !done && !dismissed { self.dialog = Some(dialog); }
+        if !done && !dismissed {
+            self.dialog = Some(dialog);
+        } else if let Dialog::EditPlaylist { cover: Some(NewCover::Picked(uri, _)), .. } = &dialog {
+            ctx.forget_image(uri);
+        }
     }
 
     fn backup_stream_dialog(&mut self, ctx: &egui::Context) {
@@ -195,7 +275,8 @@ impl App {
         }
         if open {
             self.settings_query.clear();
-            self.settings_tab = pages::SettingsTab::General;
+            self.settings_tab = pages::SettingsTab::Advanced;
+            self.settings_page = true;
             self.reveal_backup_setting = true;
             self.go(Page::Settings);
         }
@@ -216,7 +297,7 @@ impl App {
             ui.add_space(6.0);
             ui.label(egui::RichText::new(crate::tr!("dialog-stop-collaboration-desc")).font(theme::regular(13.0)).color(theme::text_dim()));
             ui.add_space(24.0);
-            let (ok, cancel) = dialog_buttons(ui, crate::tr!("dialog-turn-off"), !*busy, accent);
+            let (ok, _, cancel) = dialog_buttons(ui, crate::tr!("dialog-turn-off"), None, !*busy, accent);
             if ok {
                 change = Some(CollabChange::Collaborate(false));
             }
@@ -282,6 +363,67 @@ fn field_label(ui: &mut Ui, label: &str) {
     ui.add_space(8.0);
 }
 
+/// Pictures picked for Edit playlist so far: each gets an image URI of its own, so the
+/// one shown is never a picture picked before it.
+static PICKS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// A button under Edit playlist's picture.
+enum CoverPick {
+    Change,
+    Remove,
+}
+
+/// Edit playlist's picture: the cover now, the one picked to replace it, or none once
+/// it's to be removed; and the buttons to pick one or remove it.
+fn cover_picker(ui: &mut Ui, thumbs: &[crate::model::Thumb], change: Option<&NewCover>) -> Option<CoverPick> {
+    use egui::{Sense, pos2, vec2};
+    field_label(ui, crate::tr!("dialog-picture"));
+    let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 88.0), Sense::hover());
+    let art = egui::Rect::from_min_size(row.min, vec2(88.0, 88.0));
+    match change {
+        Some(NewCover::Picked(uri, jpeg)) => {
+            egui::Image::from_bytes(uri.clone(), egui::load::Bytes::Shared(jpeg.clone())).corner_radius(8).paint_at(ui, art);
+        }
+        // YouTube Music picks its own once Save is done; until then, no picture.
+        Some(NewCover::Removed) => widgets::paint_cover(ui, art, &[], 8.0, 1.0),
+        None => widgets::paint_cover(ui, art, thumbs, 8.0, 1.0),
+    }
+    let buttons = egui::Rect::from_min_max(pos2(art.right() + 18.0, row.top()), row.max);
+    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(buttons).layout(egui::Layout::left_to_right(egui::Align::Center)));
+    child.spacing_mut().item_spacing.x = 8.0;
+    let mut pick = None;
+    if widgets::pill(&mut child, crate::tr!("dialog-change-picture"), Some(theme::icon::UPLOAD), false).clicked() {
+        pick = Some(CoverPick::Change);
+    }
+    if !matches!(change, Some(NewCover::Removed)) && widgets::pill(&mut child, crate::tr!("dialog-remove-picture"), None, false).clicked() {
+        pick = Some(CoverPick::Remove);
+    }
+    pick
+}
+
+/// The playlist picker's search box, focused as it opens so typing narrows the list at once.
+/// Whether the query changed.
+fn search_field(ui: &mut Ui, query: &mut String) -> bool {
+    use egui::{Sense, pos2, vec2};
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 38.0), Sense::hover());
+    ui.painter().rect_filled(rect, 19.0, theme::glass(0.08));
+    widgets::icon_at(ui, pos2(rect.left() + 18.0, rect.center().y), theme::icon::SEARCH, 15.0, theme::text_dim());
+    let inner = egui::Rect::from_min_max(pos2(rect.left() + 34.0, rect.top() + 3.0), pos2(rect.right() - 12.0, rect.bottom() - 3.0));
+    let edit = ui.put(
+        inner,
+        egui::TextEdit::singleline(query)
+            .hint_text(egui::RichText::new(crate::tr!("dialog-search-playlists")).color(theme::text_faint()))
+            .font(theme::regular(14.0))
+            .frame(egui::Frame::NONE)
+            .align(egui::Align2::LEFT_CENTER)
+            .desired_width(inner.width()),
+    );
+    if ui.memory(|m| m.focused().is_none()) {
+        edit.request_focus();
+    }
+    edit.changed()
+}
+
 /// A labelled text box on a glass fill, like the jam and transfer pages' inputs.
 pub(super) fn text_field(ui: &mut Ui, label: &str, text: &mut String, multiline: bool, hint: &str) -> egui::Response {
     use egui::{Sense, vec2};
@@ -330,10 +472,22 @@ fn privacy_picker(ui: &mut Ui, privacy: &mut Option<String>) {
     }
 }
 
-/// Cancel and a primary button, right-aligned: (primary clicked, cancel clicked).
-fn dialog_buttons(ui: &mut Ui, primary: &str, enabled: bool, accent: Color32) -> (bool, bool) {
+/// Which songs `playlist` has already, by title: the first three, and how many more.
+/// None named: YouTube Music only said some are.
+pub(super) fn duplicates_body(playlist: &str, duplicates: &[String]) -> String {
+    if duplicates.is_empty() {
+        return crate::tr!("dialog-add-duplicates-some", title = playlist);
+    }
+    let shown = duplicates.len().min(3);
+    let songs = duplicates[..shown].join(", ");
+    crate::tr!("dialog-add-duplicates-body", title = playlist, songs = songs.as_str(), count = duplicates.len(), more = duplicates.len() - shown)
+}
+
+/// Cancel, an optional middle pill and a primary button, right-aligned:
+/// (primary clicked, middle clicked, cancel clicked).
+fn dialog_buttons(ui: &mut Ui, primary: &str, middle: Option<&str>, enabled: bool, accent: Color32) -> (bool, bool, bool) {
     use egui::{Sense, vec2};
-    let (mut ok, mut cancel) = (false, false);
+    let (mut ok, mut middle_clicked, mut cancel) = (false, false, false);
     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
         ui.spacing_mut().item_spacing.x = 10.0;
         let fg = theme::on_fill(accent);
@@ -346,9 +500,12 @@ fn dialog_buttons(ui: &mut Ui, primary: &str, enabled: bool, accent: Color32) ->
         ui.painter().rect_filled(rect, 19.0, theme::with_alpha(fill, if enabled { 1.0 } else { 0.35 }));
         ui.painter().galley_with_override_text_color(rect.center() - g.size() / 2.0, g, theme::with_alpha(fg, if enabled { 1.0 } else { 0.6 }));
         ok = resp.clicked();
+        if let Some(pill) = middle {
+            middle_clicked = widgets::pill(ui, pill, None, false).clicked();
+        }
         cancel = widgets::pill(ui, crate::tr!("ui-cancel"), None, false).clicked();
     });
-    (ok, cancel)
+    (ok, middle_clicked, cancel)
 }
 
 /// A lone right-aligned Done for a dialog whose changes apply as they're made.

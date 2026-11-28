@@ -45,6 +45,21 @@ status-episodes = { $count ->
     [many] { $count } odcinków
    *[other] { $count } odcinka
 }
+status-plays = { $count ->
+    [one] { $shown } odtworzenie
+    [few] { $shown } odtworzenia
+    [many] { $shown } odtworzeń
+   *[other] { $shown } odtworzenia
+}
+status-subscribers = { $count ->
+    [one] { $shown } subskrybent
+    [few] { $shown } subskrybentów
+    [many] { $shown } subskrybentów
+   *[other] { $shown } subskrybenta
+}
 status-download-quoted-title = „{ $title }”
 discord-view-artist = Przejdź do wykonawcy
 discord-view-album = Przejdź do albumu
+status-kept-downloaded = Zostaw pobrane: utwory dodane do tej playlisty też są pobierane
+status-not-kept-downloaded = Już nie zostaje pobrana. Utwory pobrane wcześniej zostają
+status-resumed-at = Wznawianie tam, gdzie skończyłeś, o { $time }

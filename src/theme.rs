@@ -62,10 +62,10 @@ fn fade() -> f32 {
     f32::from_bits(FADE.load(std::sync::atomic::Ordering::Relaxed))
 }
 
-/// How long a UI transition written as 1 second runs: [`SPEED`] and the theme's fades
+/// How long a UI transition written as 1 second runs: [`speed`] and the theme's fades
 /// (never 0: a theme's fades go down to 0.3 of the usual).
 pub fn motion() -> f32 {
-    SPEED * fade()
+    speed() * fade()
 }
 
 /// Text and icons on a fill of the main text colour (a primary button, a selected chip).
@@ -802,27 +802,96 @@ pub fn ease_in_out(t: f32) -> f32 {
     if t < 0.5 { 4.0 * t * t * t } else { 1.0 - (-2.0 * t + 2.0).powi(3) / 2.0 }
 }
 
-/// Every UI transition runs at this fraction of the time it's written with: one knob
-/// for how snappy the app feels. (Lyrics keep their own timing.)
-pub const SPEED: f32 = 0.65;
+/// Every UI transition runs at this fraction of the time it's written with, at the
+/// listener's usual animation speed: how snappy the app feels. (Lyrics keep their own timing.)
+const SPEED: f32 = 0.65;
+
+/// Settings › Appearance › Animation speed, as a multiple of the theme's own (f32 bits).
+static ANIM_SPEED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x3f80_0000);
+
+/// Range and step of Settings › Appearance › Animation speed (1: the theme's own).
+pub const ANIM_SPEED_RANGE: (f32, f32, f32) = (1.0, 4.0, 0.25);
+
+/// Animation speed Off, the step past the fastest (#446): so fast that every transition is
+/// over within a frame, while all the timing that divides by the speed works as it is.
+pub const ANIM_OFF: f32 = 1000.0;
+
+/// The listener's animation speed, never below the theme's own: 2 runs every transition in
+/// half the time.
+pub fn anim_speed() -> f32 {
+    f32::from_bits(ANIM_SPEED.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+/// Whether animations are Off: what's timed from when it started is drawn finished from its
+/// first frame, which at any speed would still start from nothing.
+pub fn anim_off() -> bool {
+    anim_speed() >= ANIM_OFF
+}
+
+/// The fraction of its written time a UI transition runs for: [`SPEED`], shortened by the
+/// listener's animation speed.
+pub fn speed() -> f32 {
+    SPEED / anim_speed()
+}
+
+/// Set the listener's animation speed, and egui's own transitions with it.
+pub fn set_anim_speed(ctx: &egui::Context, factor: f32) {
+    let factor = if factor >= ANIM_OFF { ANIM_OFF } else { factor.clamp(ANIM_SPEED_RANGE.0, ANIM_SPEED_RANGE.1) };
+    if ANIM_SPEED.swap(factor.to_bits(), std::sync::atomic::Ordering::Relaxed) != factor.to_bits() {
+        ctx.global_style_mut(egui_timings);
+    }
+}
+
+/// A transition timed by hand from when it started rather than through [`anim`] (a toast,
+/// a menu's items, a crossfade): its written length, shortened by the listener's animation
+/// speed. These already run at their own pace, so [`SPEED`] isn't applied on top.
+pub fn secs(written: f64) -> f64 {
+    written / f64::from(anim_speed())
+}
+
+/// egui's own transitions (collapsing headers, scroll bars and the like), and its scrolls
+/// to a spot (jumping to the playing song, a search hit).
+fn egui_timings(s: &mut egui::Style) {
+    s.animation_time = 0.18 * speed() * fade();
+    let d = egui::style::ScrollAnimation::default();
+    let k = anim_speed();
+    s.scroll_animation = egui::style::ScrollAnimation { points_per_second: d.points_per_second * k, duration: egui::Rangef::new(d.duration.min / k, d.duration.max / k) };
+}
 
 /// Animate toward `target` (eased), keyed by `id`. Requests repaints while moving.
 pub fn anim(ctx: &egui::Context, id: impl std::hash::Hash + std::fmt::Debug, target: f32, secs: f32) -> f32 {
-    ctx.animate_value_with_time(egui::Id::unique(id), target, secs * SPEED * fade())
+    ctx.animate_value_with_time(egui::Id::unique(id), target, secs * speed() * fade())
 }
 
 pub fn anim_bool(ctx: &egui::Context, id: impl std::hash::Hash + std::fmt::Debug, on: bool, secs: f32) -> f32 {
-    eased(ctx.animate_bool_with_time(egui::Id::unique(id), on, secs * SPEED * fade()))
+    eased(anim_bool_linear(ctx, id, on, secs))
+}
+
+/// [`anim_bool`] uneased: a fade that leaves at once rather than lingering on the way out.
+pub fn anim_bool_linear(ctx: &egui::Context, id: impl std::hash::Hash + std::fmt::Debug, on: bool, secs: f32) -> f32 {
+    ctx.animate_bool_with_time(egui::Id::unique(id), on, secs * speed() * fade())
 }
 
 /// [`anim_bool`] eased in and out, never overshooting: for a slow, gentle change such as a dimming.
 pub fn anim_bool_soft(ctx: &egui::Context, id: impl std::hash::Hash + std::fmt::Debug, on: bool, secs: f32) -> f32 {
-    ease_in_out(ctx.animate_bool_with_time(egui::Id::unique(id), on, secs * SPEED * fade()))
+    ease_in_out(ctx.animate_bool_with_time(egui::Id::unique(id), on, secs * speed() * fade()))
+}
+
+/// [`anim_bool`] for a fade the song's timing starts (a lyric line lighting up), which
+/// Animation speed leaves alone as it does the lyrics.
+pub fn anim_bool_song(ctx: &egui::Context, id: impl std::hash::Hash + std::fmt::Debug, on: bool, secs: f32) -> f32 {
+    eased(ctx.animate_bool_with_time(egui::Id::unique(id), on, secs * SPEED * fade()))
+}
+
+/// [`anim`] for a change the song's timing starts (the credits brightening once the last line
+/// is sung), left alone by Animation speed like [`anim_bool_song`].
+pub fn anim_song(ctx: &egui::Context, id: impl std::hash::Hash + std::fmt::Debug, target: f32, secs: f32) -> f32 {
+    ctx.animate_value_with_time(egui::Id::unique(id), target, secs * SPEED * fade())
 }
 
 /// [`anim_bool`] for a transition whose length the theme sets itself, so `ui_fade_secs` leaves it alone.
 pub fn anim_bool_timed(ctx: &egui::Context, id: impl std::hash::Hash + std::fmt::Debug, on: bool, secs: f32) -> f32 {
-    eased(ctx.animate_bool_with_time(egui::Id::unique(id), on, secs * SPEED))
+    eased(ctx.animate_bool_with_time(egui::Id::unique(id), on, secs * speed()))
 }
 
 fn eased(t: f32) -> f32 {
@@ -1548,18 +1617,36 @@ fn map(path: impl AsRef<std::path::Path>) -> Option<&'static [u8]> {
 
 /// Apply a theme preset's chrome: how strong glass surfaces are and how round
 /// buttons, pills and fields are.
-pub fn apply_chrome(ctx: &egui::Context, p: &crate::preset::Preset) {
+/// `lyrics`: the lyrics look in use, another theme's when the listener picked one.
+pub fn apply_chrome(ctx: &egui::Context, p: &crate::preset::Preset, lyrics: &crate::preset::LyricStyle) {
     GLASS.store(p.chrome.glass.clamp(0.0, 2.5).to_bits(), std::sync::atomic::Ordering::Relaxed);
     let dim = crate::preset::hex(&p.app.text_dim).unwrap_or(TEXT_DIM);
     DIM.store(u32::from_le_bytes(dim.to_array()), std::sync::atomic::Ordering::Relaxed);
     TEXT_OVER.store(crate::preset::hex(&p.app.text_color).map_or(0, |c| u32::from_le_bytes(c.to_array())), std::sync::atomic::Ordering::Relaxed);
     FADE.store(p.app.ui_fade_secs.map_or(1.0, |s| (s / 0.18).clamp(0.3, 3.0)).to_bits(), std::sync::atomic::Ordering::Relaxed);
     install_style(ctx);
-    install_fonts(ctx, &p.app.font, &[&p.lyrics.font]);
+    install_fonts(ctx, &p.app.font, &[&p.lyrics.font, &lyrics.font]);
+}
+
+/// Linux: tell the window the pages' light or dark, once a frame (only a change is sent). An
+/// X11 title bar the desktop draws takes it from the window (`_GTK_THEME_VARIANT`), and a
+/// window told nothing gets the desktop's default whatever Mode says. Not on macOS: a window
+/// told a theme hears no more of the system's, which Mode: System needs (#412).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn sync_window_theme(ctx: &egui::Context, light: bool) {
+    let id = egui::Id::unique("window-theme-light");
+    if ctx.data(|d| d.get_temp::<bool>(id)) != Some(light) {
+        ctx.data_mut(|d| d.insert_temp(id, light));
+        ctx.send_viewport_cmd(egui::ViewportCommand::SetTheme(if light { egui::SystemTheme::Light } else { egui::SystemTheme::Dark }));
+    }
 }
 
 pub fn install_style(ctx: &egui::Context) {
     ctx.set_theme(egui::Theme::Dark);
+    // egui's theme is always Dark: the app draws light or dark itself (`Appearance`). Left
+    // on, egui would pin the window to that Dark too, and a pinned window hears nothing more
+    // from the system, so on macOS Mode: System stayed as it was at launch (#412).
+    ctx.options_mut(|o| o.sync_window_theme = false);
     ctx.global_style_mut(|s| {
         s.spacing.item_spacing = egui::vec2(8.0, 6.0);
         s.spacing.button_padding = egui::vec2(14.0, 7.0);
@@ -1568,6 +1655,11 @@ pub fn install_style(ctx: &egui::Context) {
         // egui fades a scrolled list's edges in its own panel colour, square: over the app's
         // own backgrounds that's a dark band, showing at the corners of a rounded row.
         s.spacing.scroll.fade.strength = 0.0;
+        // A page stops at its ends under a finger, as it does under the wheel and the
+        // touchpad, instead of pulling past them and springing back (#190). Not on macOS:
+        // there the trackpad's scrolling reaches egui untouched, and egui stretches it
+        // past the ends as macOS itself does. Macs have no touch screens.
+        s.spacing.scroll.kinetic.rubber_band = cfg!(target_os = "macos");
         if crate::preset::active().app.hide_scrollbars {
             let bar = &mut s.spacing.scroll;
             (bar.dormant_handle_opacity, bar.active_handle_opacity, bar.interact_handle_opacity) = (0.0, 0.0, 0.0);
@@ -1585,7 +1677,7 @@ pub fn install_style(ctx: &egui::Context) {
         s.text_styles.insert(egui::TextStyle::Small, regular(12.0));
         s.visuals = visuals();
         s.interaction.selectable_labels = false;
-        s.animation_time = 0.18 * SPEED * fade();
+        egui_timings(s);
     });
 }
 
@@ -1642,6 +1734,93 @@ fn visuals() -> egui::Visuals {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn at_the_usual_animation_speed_transitions_run_as_they_always_have() {
+        // Nothing else sets it in tests: the listener's speed starts at the theme's own.
+        assert_eq!(anim_speed(), 1.0);
+        assert_eq!(speed(), SPEED);
+        assert_eq!(secs(0.32), 0.32);
+        let mut s = egui::Style::default();
+        egui_timings(&mut s);
+        let d = egui::style::ScrollAnimation::default();
+        assert_eq!((s.scroll_animation.points_per_second, s.scroll_animation.duration), (d.points_per_second, d.duration));
+    }
+
+    /// The window isn't told a theme, so it keeps following the system's light or dark (#412).
+    #[test]
+    fn the_window_keeps_the_systems_theme() {
+        let ctx = egui::Context::default();
+        install_fonts(&ctx, "", &[]);
+        install_style(&ctx);
+        let mut out = ctx.run_ui(egui::RawInput::default(), |_| {});
+        out.textures_delta.clear();
+        let sent = out.viewport_output.values().flat_map(|v| &v.commands).any(|c| matches!(c, egui::ViewportCommand::SetTheme(_)));
+        assert!(!sent);
+    }
+
+    /// Linux tells the window the pages' mode, once per change.
+    #[test]
+    fn the_window_is_told_the_pages_mode_once_per_change() {
+        let ctx = egui::Context::default();
+        install_fonts(&ctx, "", &[]);
+        install_style(&ctx);
+        let sent = |light: bool| {
+            let mut out = ctx.run_ui(egui::RawInput::default(), |ui| sync_window_theme(ui.ctx(), light));
+            out.textures_delta.clear();
+            out.viewport_output.values().flat_map(|v| &v.commands).filter_map(|c| if let egui::ViewportCommand::SetTheme(t) = c { Some(*t) } else { None }).collect::<Vec<_>>()
+        };
+        assert_eq!(sent(false), [egui::SystemTheme::Dark]);
+        assert_eq!(sent(false), []);
+        assert_eq!(sent(true), [egui::SystemTheme::Light]);
+        assert_eq!(sent(true), []);
+    }
+
+    /// How far past the top a page goes while a finger pulls it down from there and holds.
+    #[cfg(not(target_os = "macos"))]
+    fn pulled_past_top(styled: bool) -> f32 {
+        use egui::{Event, Modifiers, PointerButton, Pos2, RawInput, Rect, TouchDeviceId, TouchId, TouchPhase, pos2, vec2};
+        let ctx = egui::Context::default();
+        install_fonts(&ctx, "", &[]);
+        if styled {
+            install_style(&ctx);
+        }
+        let (mut time, mut past) = (0.0, 0.0_f32);
+        let mut frame = |events: Vec<Event>| {
+            let raw = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(800.0, 600.0))), time: Some(time), predicted_dt: 1.0 / 60.0, events, ..Default::default() };
+            time += 1.0 / 60.0;
+            let mut out = ctx.run_ui(raw, |ui| {
+                let area = egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| ui.allocate_space(vec2(700.0, 3000.0)));
+                past = past.max(-area.state.overscroll().y);
+            });
+            out.textures_delta.clear();
+        };
+        let mut touch = |phase, p: Pos2| {
+            let t = Event::Touch { device_id: TouchDeviceId(1), id: TouchId(1), phase, pos: p, force: None };
+            let press = |pressed| Event::PointerButton { pos: p, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+            frame(match phase {
+                TouchPhase::Start => vec![t, Event::PointerMoved(p), press(true)],
+                TouchPhase::Move => vec![t, Event::PointerMoved(p)],
+                _ => vec![t, press(false), Event::PointerGone],
+            });
+        };
+        // A tap first: egui scrolls by dragging once it has seen a touch screen.
+        touch(TouchPhase::Start, pos2(400.0, 500.0));
+        touch(TouchPhase::End, pos2(400.0, 500.0));
+        touch(TouchPhase::Start, pos2(400.0, 100.0));
+        for s in 1..=10 {
+            touch(TouchPhase::Move, pos2(400.0, 100.0 + 30.0 * s as f32));
+        }
+        past
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn a_finger_doesnt_pull_a_page_past_its_top() {
+        assert_eq!(pulled_past_top(true), 0.0);
+        // egui's own default does, which is what the app turns off.
+        assert!(pulled_past_top(false) > 10.0);
+    }
 
     #[cfg(target_os = "linux")]
     #[test]

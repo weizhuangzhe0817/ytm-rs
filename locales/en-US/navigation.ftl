@@ -4,6 +4,7 @@ nav-explore = Explore
 nav-library = Library
 nav-library-section = Library › { $tab }
 nav-playlists = Playlists
+nav-community-playlists = Community playlists
 nav-liked-songs = Liked songs
 nav-albums = Albums
 nav-artists = Artists
@@ -24,6 +25,16 @@ nav-refresh-shortcut = Refresh (F5)
 nav-search-music = Search songs, albums, artists
 nav-search-podcasts = Search songs, albums, artists, podcasts
 nav-clear-search = Clear search
+
+# A YouTube Music or YouTube link pasted into the search box.
+link-open = Open link
+link-not-found = Nothing was found behind that link
+link-play-song = Play this song
+link-open-album = Open this album
+link-open-playlist = Open this playlist
+link-open-artist = Open this artist
+link-queue-hint = Shift+Enter adds it to the queue
+
 nav-remove-recent-search = Remove from recent searches
 nav-new-releases-for-you = New releases for you
 nav-new-releases = Popular new releases

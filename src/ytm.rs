@@ -141,6 +141,9 @@ pub enum Filter {
     Artists,
     /// Playlists made by YouTube Music (not the community ones).
     Playlists,
+    /// Playlists made by YouTube Music's listeners, which the site keeps on their own
+    /// shelf.
+    Community,
     Videos,
     /// Podcast shows.
     Podcasts,
@@ -155,6 +158,7 @@ impl Filter {
             Filter::Albums => "EgWKAQIYAWoQEAMQBBAJEAoQBRAREBAQFQ%3D%3D",
             Filter::Artists => "EgWKAQIgAWoQEAMQBBAJEAoQBRAREBAQFQ%3D%3D",
             Filter::Playlists => "EgeKAQQoADgBahIQAxAEEAkQDhAKEAUQERAQEBU%3D",
+            Filter::Community => "EgeKAQQoAEABahIQAxAEEAkQDhAKEAUQERAQEBU%3D",
             Filter::Videos => "EgWKAQIQAWoQEAMQBBAJEAoQBRAREBAQFQ%3D%3D",
             Filter::Podcasts => "EgWKAQJQAWoQEAMQBBAJEAoQBRAREBAQFQ%3D%3D",
             Filter::Episodes => "EgWKAQJIAWoQEAMQBBAJEAoQBRAREBAQFQ%3D%3D",
@@ -1023,6 +1027,7 @@ fn parse_artist(v: &Value, id: &str) -> Option<ArtistPage> {
         top: Vec::new(),
         top_playlist: None,
         albums: Vec::new(),
+        videos: Vec::new(),
         library: Vec::new(),
         playlists: Vec::new(),
         similar: Vec::new(),
@@ -1061,7 +1066,7 @@ fn parse_artist(v: &Value, id: &str) -> Option<ArtistPage> {
                 }
                 Target::Playlist(_) => page.playlists.push(card),
                 Target::Artist(_) => page.similar.push(card),
-                Target::Song(_) => {}
+                Target::Song(_) => page.videos.push(card),
             }
         }
     }
@@ -1137,6 +1142,21 @@ fn leading_int(s: &str) -> Option<u64> {
         }
     }
     digits.parse().ok()
+}
+
+/// A song or video by its id alone, as the queue lists it. `None`: there's no such thing.
+pub async fn song(api: &Api, video_id: &str, auth: bool) -> anyhow::Result<Option<Track>> {
+    let body = json!({"videoId": video_id, "isAudioOnly": true, "enablePersistentPlaylistPanel": true});
+    let v = api.call("next", body, auth).await?;
+    let panel = &v["contents"]["singleColumnMusicWatchNextResultsRenderer"]["tabbedRenderer"]["watchNextTabbedResultsRenderer"]["tabs"][0]
+        ["tabRenderer"]["content"]["musicQueueRenderer"]["content"]["playlistPanelRenderer"];
+    Ok(panel_page(panel).0.into_iter().map(|(t, _)| t).find(|t| t.id == video_id))
+}
+
+/// The page a music.youtube.com address stands for: an artist's `@handle`, an album's list.
+pub async fn resolve(api: &Api, url: &str) -> anyhow::Result<Option<Target>> {
+    let v = api.call("navigation/resolve_url", json!({ "url": url }), false).await?;
+    Ok(v["endpoint"]["browseEndpoint"]["browseId"].as_str().and_then(crate::link::page))
 }
 
 /// The first string keyed `key` anywhere under `v`.
@@ -1662,6 +1682,7 @@ fn parse_upload_artist(v: &Value, id: &str) -> Option<(ArtistPage, Option<String
         top,
         top_playlist: None,
         albums: Vec::new(),
+        videos: Vec::new(),
         library: Vec::new(),
         playlists: Vec::new(),
         similar: Vec::new(),
@@ -1850,11 +1871,39 @@ pub async fn create_playlist_with(api: &Api, title: &str, video_ids: &[String]) 
     value["playlistId"].as_str().map(str::to_owned).ok_or_else(|| anyhow::anyhow!("YouTube Music did not return a playlist"))
 }
 
-/// Add songs to a playlist in one request, skipping any already in it.
-pub async fn add_videos(api: &Api, playlist_id: &str, video_ids: &[String]) -> anyhow::Result<()> {
-    let actions: Vec<Value> = video_ids.iter().map(|v| json!({"action": "ACTION_ADD_VIDEO", "addedVideoId": v, "dedupeOption": "DEDUPE_OPTION_SKIP"})).collect();
-    write(api, "browse/edit_playlist", json!({"playlistId": playlist_id, "actions": actions})).await?;
-    Ok(())
+/// What an add does with songs the playlist has already.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Duplicates {
+    /// Add nothing if any are there, and say so.
+    Ask,
+    /// Add only the songs it doesn't have.
+    Skip,
+    /// Add them all, a second time for some.
+    Add,
+}
+
+/// Add songs to a playlist in one request: `Ok(false)` when [`Duplicates::Ask`] found
+/// some there already, and none went in.
+pub async fn add_videos(api: &Api, playlist_id: &str, video_ids: &[String], duplicates: Duplicates) -> anyhow::Result<bool> {
+    // DEDUPE_OPTION_SKIP skips the check, not the songs: it's the one that adds twice.
+    let option = match duplicates {
+        Duplicates::Ask => "DEDUPE_OPTION_CHECK",
+        Duplicates::Skip => "DEDUPE_OPTION_DROP_DUPLICATE",
+        Duplicates::Add => "DEDUPE_OPTION_SKIP",
+    };
+    let actions: Vec<Value> = video_ids.iter().map(|v| json!({"action": "ACTION_ADD_VIDEO", "addedVideoId": v, "dedupeOption": option})).collect();
+    let value = api.call_signed_in("browse/edit_playlist", json!({"playlistId": playlist_id, "actions": actions})).await?;
+    if duplicates == Duplicates::Ask && asks_about_duplicates(&value) {
+        return Ok(false);
+    }
+    anyhow::ensure!(!value["status"].as_str().is_some_and(|s| !s.contains("SUCCEEDED")), "YouTube Music rejected the change");
+    Ok(true)
+}
+
+/// A refused add that offers to add the songs anyway (a toast for one, a dialog for
+/// more): that offer is the same add with the check skipped, in any language.
+fn asks_about_duplicates(answer: &Value) -> bool {
+    answer["status"].as_str().is_some_and(|s| !s.contains("SUCCEEDED")) && answer["actions"].to_string().contains("DEDUPE_OPTION_SKIP")
 }
 
 pub async fn edit_playlist(api: &Api, id: &str, title: &str, description: &str, privacy: Option<&str>) -> anyhow::Result<()> {
@@ -1866,6 +1915,20 @@ pub async fn edit_playlist(api: &Api, id: &str, title: &str, description: &str, 
         actions.push(json!({"action": "ACTION_SET_PLAYLIST_PRIVACY", "playlistPrivacy": privacy}));
     }
     write(api, "browse/edit_playlist", json!({"playlistId": id, "actions": actions})).await?;
+    Ok(())
+}
+
+/// Make an uploaded picture (`Session::upload_playlist_cover`'s id) a playlist's cover.
+pub async fn set_playlist_cover(api: &Api, id: &str, blob: &str) -> anyhow::Result<()> {
+    let image = json!({"imageKey": {"type": "PLAYLIST_IMAGE_TYPE_CUSTOM_THUMBNAIL", "name": "studio_square_thumbnail"}, "playlistScottyEncryptedBlobId": blob});
+    write(api, "browse/edit_playlist", json!({"playlistId": id, "actions": [{"action": "ACTION_SET_CUSTOM_THUMBNAIL", "addedCustomThumbnail": image}]})).await?;
+    Ok(())
+}
+
+/// Take a playlist's own picture off, back to YouTube Music's cover.
+pub async fn remove_playlist_cover(api: &Api, id: &str) -> anyhow::Result<()> {
+    let image = json!({"type": "PLAYLIST_IMAGE_TYPE_CUSTOM_THUMBNAIL", "name": "studio_square_thumbnail"});
+    write(api, "browse/edit_playlist", json!({"playlistId": id, "actions": [{"action": "ACTION_REMOVE_CUSTOM_THUMBNAIL", "deletedCustomThumbnail": image}]})).await?;
     Ok(())
 }
 
@@ -2401,9 +2464,11 @@ fn count_and_rest(s: &str) -> Option<(u64, &str)> {
         _ => match word {
             // Spanish billions: "3,4 mil M".
             "mil" if words.next() == Some("M") => 1e9,
-            "K" | "k" | "Tsd" | "mil" | "mila" | "tys" | "тыс" => 1e3,
-            "M" | "Mio" | "mi" | "Mln" | "mln" | "млн" => 1e6,
-            "B" | "Mrd" | "Md" | "bi" | "Mld" | "mld" | "млрд" => 1e9,
+            // Indonesian billions: "1,2 M pemutaran" / "1,2 M x ditonton" (M = miliar).
+            "M" if matches!(words.next(), Some("pemutaran" | "ditonton" | "kali" | "x" | "pendengar" | "subscriber")) => 1e9,
+            "K" | "k" | "Tsd" | "mil" | "mila" | "tys" | "тыс" | "rb" | "Rb" => 1e3,
+            "M" | "Mio" | "mi" | "Mln" | "mln" | "млн" | "jt" | "Jt" => 1e6,
+            "B" | "Mrd" | "Md" | "bi" | "Mld" | "mld" | "млрд" | "mlr" | "Mlr" => 1e9,
             _ if fraction => return None,
             _ => 1.0,
         },
@@ -2478,6 +2543,21 @@ fn upload_page(run: &Value) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_refused_add_offering_add_anyway_is_about_duplicates() {
+        // Trimmed from YouTube Music's answers (November 2026): one song, then two.
+        let add = |opt: &str| json!({"playlistEditEndpoint": {"actions": [{"action": "ACTION_ADD_VIDEO", "addedVideoId": "a", "dedupeOption": opt}]}});
+        let toast = json!({"status": "STATUS_FAILED", "actions": [{"addToToastAction": {"item": {"notificationActionRenderer": {"actionButton": {"buttonRenderer": {"command": add("DEDUPE_OPTION_SKIP")}}}}}}]});
+        let dialog = json!({"status": "STATUS_FAILED", "actions": [{"confirmDialogEndpoint": {"content": {"confirmDialogRenderer": {
+            "cancelButton": {"buttonRenderer": {"command": add("DEDUPE_OPTION_DROP_DUPLICATE")}},
+            "confirmButton": {"buttonRenderer": {"command": add("DEDUPE_OPTION_SKIP")}},
+        }}}}]});
+        assert!(asks_about_duplicates(&toast));
+        assert!(asks_about_duplicates(&dialog));
+        assert!(!asks_about_duplicates(&json!({"status": "STATUS_FAILED", "actions": []})));
+        assert!(!asks_about_duplicates(&json!({"status": "STATUS_SUCCEEDED", "actions": [{"addToToastAction": {}}]})));
+    }
 
     #[test]
     fn song_rating_comes_from_the_requested_player_button() {
@@ -3199,6 +3279,20 @@ mod tests {
         }
     }
 
+    /// What a song's id, an artist's handle and an album's list stand for, signed out. Run alone:
+    /// `cargo test --bin ytm-rs -- --ignored ytm::tests::links_live --exact`
+    #[tokio::test]
+    #[ignore]
+    async fn links_live() {
+        let api = crate::ytmapi::Api::new(&std::env::temp_dir().join("ytm-rs-links-test"));
+        assert_eq!(super::song(&api, "lYBUbBu4W08", false).await.unwrap().unwrap().title, "Never Gonna Give You Up");
+        assert_eq!(super::song(&api, "zzzzzzzzzzz", false).await.unwrap(), None);
+        assert_eq!(resolve(&api, "https://music.youtube.com/@RickAstleyYT").await.unwrap(), Some(Target::Artist("UCuAXFkgsw1L7xaCfnd5JJOw".into())));
+        let album = "https://music.youtube.com/playlist?list=OLAK5uy_nmDUsWOMoEcz0SsVqUwir0oxu-k1oUyXE";
+        assert_eq!(resolve(&api, album).await.unwrap(), Some(Target::Album("MPREb_dcYZhAh5urI".into())));
+        assert_eq!(resolve(&api, "https://music.youtube.com/@doesnotexist123456789xyz").await.unwrap(), None);
+    }
+
     /// A song's Lyrics tab, signed out. Run alone:
     /// `cargo test --bin ytm-rs -- --ignored ytm::tests::lyrics_live --exact`
     #[tokio::test]
@@ -3329,7 +3423,9 @@ mod tests {
         assert_eq!(ids, ["aaaaaaaaaaa", "bbbbbbbbbbb"]);
         assert_eq!(page.library[0].title, "Moral of the Story");
         assert_eq!(page.library[0].links.first().and_then(|l| l.id.as_deref()), Some("UCa"));
-        // Other song shelves (Videos) stay out of it.
+        // Video shelves land in `videos`, leaving library/albums/playlists/similar separate.
+        assert_eq!(page.videos.len(), 1);
+        assert_eq!(page.videos[0].title, "A video");
         assert!(page.albums.is_empty() && page.playlists.is_empty() && page.similar.is_empty());
         // Signed out there's no such shelf.
         let mut out = v.clone();
@@ -3361,6 +3457,12 @@ mod tests {
         assert_eq!(count("3,82 тыс."), Some(3_820));
         assert_eq!(count("2,5 mil M reproducciones"), Some(2_500_000_000));
         assert_eq!(count("12 mil reproducciones"), Some(12_000));
+        assert_eq!(count("103 rb subscriber"), Some(103_000));
+        assert_eq!(count("7,22\u{a0}jt"), Some(7_220_000));
+        assert_eq!(count("1,2 jt kali ditonton"), Some(1_200_000));
+        assert_eq!(count("1,2\u{a0}M pemutaran"), Some(1_200_000_000));
+        assert_eq!(count("1,8\u{a0}M x ditonton"), Some(1_800_000_000));
+        assert_eq!(count("2,5 mlr kali ditonton"), Some(2_500_000_000));
         // A fraction with no unit is no count.
         assert_eq!(count("1.5"), None);
     }

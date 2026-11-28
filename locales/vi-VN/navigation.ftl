@@ -4,6 +4,7 @@ nav-explore = Khám phá
 nav-library = Thư viện
 nav-library-section = Thư viện › { $tab }
 nav-playlists = Danh sách phát
+nav-community-playlists = Danh sách phát của cộng đồng
 nav-liked-songs = Bài hát đã thích
 nav-albums = Album
 nav-artists = Nghệ sĩ
@@ -24,6 +25,15 @@ nav-refresh-shortcut = Làm mới (F5)
 nav-search-music = Tìm bài hát, album hoặc nghệ sĩ
 nav-search-podcasts = Tìm bài hát, album, nghệ sĩ hoặc podcast
 nav-clear-search = Xóa tìm kiếm
+
+# A YouTube Music or YouTube link pasted into the search box.
+link-open = Mở liên kết
+link-not-found = Không thấy gì phía sau liên kết đó
+link-play-song = Phát bài này
+link-open-album = Mở album này
+link-open-playlist = Mở danh sách phát này
+link-open-artist = Mở nghệ sĩ này
+link-queue-hint = Shift+Enter thêm vào hàng đợi
 nav-remove-recent-search = Xóa khỏi các tìm kiếm gần đây
 nav-new-releases-for-you = Bản phát hành mới dành cho bạn
 nav-new-releases = Các bản phát hành mới phổ biến

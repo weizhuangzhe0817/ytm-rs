@@ -9,6 +9,7 @@ dialog-delete-upload-title = Upload löschen?
 dialog-delete-upload = Upload löschen
 dialog-name = Name
 dialog-my-playlist = Meine Playlist
+dialog-search-playlists = Deine Playlists durchsuchen
 dialog-private-desc = Privat · nur für dich sichtbar
 dialog-playlist-name = Playlistname
 dialog-description = Beschreibung
@@ -35,5 +36,20 @@ dialog-delete-playlist-body = „{ $title }“ wird aus deiner YouTube-Music-Med
 dialog-delete-upload-body = „{ $title }“ wird aus deinen YouTube-Music-Uploads gelöscht. Das lässt sich nicht rückgängig machen.
 dialog-download-count = Herunterladen ({ $count })
 dialog-edit-playlist = Playlist bearbeiten
+dialog-picture = Bild
+dialog-change-picture = Bild ändern
+dialog-remove-picture = Entfernen
 dialog-download-body = Noch { $count } Titel herunterzuladen. Downloads laufen im Hintergrund und beginnen mit dem aktuellen Titel.
 dialog-download-collection-body = Aus „{ $title }“ sind noch { $count } Titel herunterzuladen. Downloads laufen im Hintergrund und beginnen mit dem aktuellen Titel.
+dialog-add-duplicates-title = Schon in der Playlist
+dialog-add-duplicates-some = Einige dieser Titel sind schon in „{ $title }“. Trotzdem hinzufügen?
+dialog-add-duplicates-body =
+    { $count ->
+        [one] „{ $songs }“ ist schon in „{ $title }“. Trotzdem hinzufügen?
+       *[other] { $more ->
+            [0] Diese { $count } Titel sind schon in „{ $title }“: { $songs }. Trotzdem hinzufügen?
+           *[other] Diese { $count } Titel sind schon in „{ $title }“: { $songs } und { $more } weitere. Trotzdem hinzufügen?
+        }
+    }
+dialog-add-anyway = Trotzdem hinzufügen
+dialog-skip-duplicates = Duplikate überspringen

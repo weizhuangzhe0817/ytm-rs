@@ -32,6 +32,11 @@ window-loading-notes = Loading release notes…
 window-later = Later
 window-updated = Updated to { $version }
 window-what-changed = Here's what changed.
+# Last in the card shown after updating, for the changes it leaves out.
+window-more-changes = { $count ->
+    [one] + { $count } more change
+   *[other] + { $count } more changes
+}
 window-dismiss = Dismiss
 window-all-notes = See all notes
 window-got-it = Got it
@@ -39,6 +44,7 @@ window-installed-when-closed = Version { $version } is ready. It installs when y
 window-notes-status = You’re on { $version }. { $step }
 window-package-instructions = Download the new package and install it with sudo pacman -U.
 window-package-download = Download the new .deb and open it to install it over this one.
+window-package-appimage = Download the new AppImage and use it in place of this one.
 window-package-flatpak = This copy updates through Flatpak: run flatpak update, or check your software store.
 window-keyboard-volume-up = Volume up
 window-keyboard-volume-down = Volume down

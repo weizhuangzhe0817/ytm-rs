@@ -263,22 +263,20 @@ impl App {
         if self.scrobble.is_none_or(|(g, _)| g != self.generation) {
             self.scrobble = Some((self.generation, false));
             if lastfm {
-                let (http, p) = (http.clone(), play.clone());
-                self.backend.spawn(async move { crate::lastfm::now_playing(&http, &p).await });
+                self.backend.spawn(crate::lastfm::now_playing(&http, &play));
             }
             if listenbrainz {
-                self.backend.spawn(async move { crate::listenbrainz::now_playing(&http, &listen).await });
+                self.backend.spawn(crate::listenbrainz::now_playing(&http, &listen));
             }
             return;
         }
         if dur >= Duration::from_secs(30) && pos >= (dur / 2).min(Duration::from_secs(240)) && self.scrobble.is_some_and(|(_, done)| !done) {
             self.scrobble = Some((self.generation, true));
             if lastfm {
-                let http = http.clone();
-                self.backend.spawn(async move { crate::lastfm::scrobble(&http, play).await });
+                self.backend.spawn(crate::lastfm::scrobble(&http, play));
             }
             if listenbrainz {
-                self.backend.spawn(async move { crate::listenbrainz::listen(&http, listen).await });
+                self.backend.spawn(crate::listenbrainz::listen(&http, listen));
             }
         }
     }
@@ -472,7 +470,13 @@ impl App {
         let shown = |app: &Self| !app.in_tray && ctx.input(|i| i.viewport().minimized) != Some(true);
         for cmd in crate::tray::take() {
             match cmd {
-                crate::tray::Cmd::Show => show(self),
+                crate::tray::Cmd::Click if !self.tray_click_plays => show(self),
+                // Playing or pausing waits to see it isn't a double-click, which shows the window.
+                crate::tray::Cmd::Click if self.tray_click.take().is_some() => show(self),
+                crate::tray::Cmd::Click => {
+                    self.tray_click = Some(std::time::Instant::now());
+                    ctx.request_repaint_after(crate::tray::double_click_time());
+                }
                 crate::tray::Cmd::Toggle if shown(self) => hide(self),
                 crate::tray::Cmd::Toggle => show(self),
                 // As the media keys do.
@@ -481,6 +485,14 @@ impl App {
                 crate::tray::Cmd::Prev => self.prev(),
                 crate::tray::Cmd::Recognize => super::recognize::toggle(self),
                 crate::tray::Cmd::Quit => self.quit(ctx),
+            }
+        }
+        if self.tray_click.is_some_and(|at| at.elapsed() >= crate::tray::double_click_time()) {
+            self.tray_click = None;
+            if self.queue.index.is_some() {
+                self.toggle();
+            } else {
+                show(self);
             }
         }
         let shown = shown(self);

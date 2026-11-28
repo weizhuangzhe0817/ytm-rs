@@ -45,6 +45,7 @@ pub const LANGUAGES: &[Language] = &[
     language("ja-JP", "ja"),
     language("fr-FR", "fr"),
     language("pt-BR", "pt"),
+    language("pt-PT", "pt-PT"),
     language("ru-RU", "ru"),
     language("it-IT", "it"),
     language("nl-NL", "nl"),
@@ -103,6 +104,17 @@ pub fn current() -> String {
 /// starts with a Latin name ("YouTube Premium …").
 pub fn rtl() -> bool {
     matches!(active().lang.language.as_str(), "ar" | "fa" | "he" | "ur" | "ps" | "sd" | "ug" | "ckb" | "dv" | "yi")
+}
+
+/// `n`, written with a decimal point ("1.5", "1.2M"), with this run's language's decimal
+/// mark: "1,5" in German. Fluent prints numbers with a point whatever the language.
+pub fn decimal(n: &str) -> String {
+    decimal_in(active().lang.language.as_str(), n)
+}
+
+fn decimal_in(language: &str, n: &str) -> String {
+    // The languages offered that write a decimal comma (CLDR); Arabic here uses Western digits and a point.
+    if matches!(language, "de" | "es" | "fr" | "id" | "it" | "nl" | "pl" | "pt" | "ru" | "tr" | "uk" | "vi") { n.replace('.', ",") } else { n.to_owned() }
 }
 
 /// Of [`LANGUAGES`]: `picked`, else the first of the system's languages offered (its
@@ -320,7 +332,8 @@ mod tests {
         assert_eq!(choose(Some("uk-UA"), &sys(&["pl-PL"])), "uk-UA");
         assert_eq!(choose(Some("xx-XX"), &sys(&["fr_CA.UTF-8"])), "fr-FR");
         assert_eq!(choose(None, &sys(&["sv-SE", "nl-BE", "en-US"])), "nl-NL");
-        assert_eq!(choose(None, &sys(&["pt-PT"])), "pt-BR");
+        assert_eq!(choose(None, &sys(&["pt-PT"])), "pt-PT");
+        assert_eq!(choose(None, &sys(&["pt"])), "pt-BR");
         assert_eq!(choose(None, &sys(&["sv-SE"])), "en-US");
         assert_eq!(choose(None, &sys(&["id"])), "id-ID");
         assert_eq!(choose(None, &sys(&["ar-EG"])), "ar");
@@ -344,6 +357,27 @@ mod tests {
             let args = HashMap::from([(Cow::Borrowed("count"), arg(count))]);
             assert_eq!(LOCALES.lookup_with_args(&polish, "likes-removed", &args), expected);
         }
+    }
+
+    /// The plural follows the count, not its short form, which Fluent can't read as a number.
+    #[test]
+    fn a_short_count_still_picks_its_plural() {
+        let german = fluent_templates::langid!("de-DE");
+        for (count, shown, expected) in [(1_u64, "1", "1 Wiedergabe"), (5, "5", "5 Wiedergaben"), (1_500, "1,5K", "1,5K Wiedergaben")] {
+            let args = HashMap::from([(Cow::Borrowed("count"), arg(count)), (Cow::Borrowed("shown"), arg(shown))]);
+            assert_eq!(LOCALES.lookup_with_args(&german, "status-plays", &args), expected);
+        }
+        let args = HashMap::from([(Cow::Borrowed("count"), arg(1_u64)), (Cow::Borrowed("shown"), arg("1"))]);
+        assert_eq!(LOCALES.lookup_with_args(&english(), "status-subscribers", &args), "1 subscriber");
+    }
+
+    #[test]
+    fn decimals_take_the_languages_mark() {
+        assert_eq!(decimal_in("de", "1.5"), "1,5");
+        assert_eq!(decimal_in("fr", "2.4M"), "2,4M");
+        assert_eq!(decimal_in("en", "1.5"), "1.5");
+        assert_eq!(decimal_in("ja", "1.5"), "1.5");
+        assert_eq!(decimal_in("de", "12"), "12");
     }
 
     #[test]

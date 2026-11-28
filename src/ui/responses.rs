@@ -6,7 +6,8 @@ use std::time::Duration;
 use souvlaki::MediaControlEvent;
 
 use crate::audio::{AudioCmd, AudioEvent};
-use crate::backend::{PlaylistChange, Req, Resp};
+use crate::backend::{LinkTo, LinkUse, PlaylistChange, Req, Resp};
+use crate::link::Link;
 use crate::model::{ShelfKind, Target, Track};
 use crate::ytm::HomePage;
 
@@ -25,13 +26,25 @@ impl App {
             m.set_cover(&file);
         }
         while let Ok(r) = self.ch.resp_rx.try_recv() {
-            self.on_resp(r, now);
+            self.on_resp(ctx, r, now);
         }
         while let Ok(ev) = self.ch.audio_rx.try_recv() {
             match ev {
                 AudioEvent::Finished { generation } if generation == self.generation && self.jam.guest() => {}
-                AudioEvent::Finished { generation } if generation == self.generation && self.sleep == Some(Sleep::SongEnd) => self.sleep_at_song_end(),
+                AudioEvent::Finished { generation } if generation == self.generation && self.sleep == Some(Sleep::SongEnd) => {
+                    self.left_at_end();
+                    self.sleep_at_song_end();
+                }
+                // A-B repeat comes before the next song: a song that ran out (or began
+                // fading out) inside its loop goes back to the loop's start.
+                AudioEvent::Finished { generation } if generation == self.generation && self.ab_stretch().is_some() => {
+                    if let Some((start, _)) = self.ab_stretch() {
+                        self.loop_sought = Some(std::time::Instant::now());
+                        self.play_current_at(Duration::from_secs_f64(start), false);
+                    }
+                }
                 AudioEvent::Finished { generation } if generation == self.generation => {
+                    self.left_at_end();
                     if self.repeats_one() {
                         self.play_current();
                     } else {
@@ -47,6 +60,10 @@ impl App {
                 // Crossfade into the next song, or into the song again on Repeat one; the
                 // end of the queue waits for the end.
                 // With the sleep timer set to the song's end, it plays out instead (`Finished`).
+                // Looping a stretch, `keep_looping` goes back at its end: a song whose music
+                // ends before its length asks for the next one before that end (and asks
+                // again after the seek back). Missed, `Finished` goes back.
+                AudioEvent::Ending { generation } if generation == self.generation && !self.jam.guest() && self.sleep != Some(Sleep::SongEnd) && self.ab_stretch().is_some() => {}
                 AudioEvent::Ending { generation } if generation == self.generation && !self.jam.guest() && self.sleep != Some(Sleep::SongEnd) => {
                     self.handoff = true;
                     if self.repeats_one() {
@@ -76,6 +93,22 @@ impl App {
                 // The window from the OS's media controls (KDE's, say; GNOME's use the .desktop file).
                 MediaControlEvent::Raise => self.show_window(ctx),
                 MediaControlEvent::Quit => self.quit(ctx),
+                // As the Shuffle and Repeat buttons do (a jam guest can't shuffle); either
+                // way the widget hears back what the app has now.
+                MediaControlEvent::SetShuffle(on) => {
+                    if on != self.queue.shuffled() {
+                        self.toggle_shuffle();
+                    }
+                    if let Some(m) = &mut self.media {
+                        m.resend_shuffle();
+                    }
+                }
+                MediaControlEvent::SetLoopStatus(status) => {
+                    self.queue.repeat = crate::media::repeat_from_os(status);
+                    if let Some(m) = &mut self.media {
+                        m.resend_repeat();
+                    }
+                }
                 MediaControlEvent::SetVolume(v) => {
                     if let Some(v) = crate::media::volume_from_os(v) {
                         self.audio.set_volume(v);
@@ -95,6 +128,10 @@ impl App {
         }
         for cmd in self.remote.drain() {
             self.on_remote(cmd);
+        }
+        // Playing here (not at a jam host's position): where it's left is noted.
+        if self.left_from.is_none() && !self.jam.guest() && self.audio.status.started(self.generation) {
+            self.left_from = self.current().map(|t| t.id.clone());
         }
         if self.buffering && self.audio.status.started(self.generation) {
             self.buffering = false;
@@ -132,9 +169,16 @@ impl App {
         if self.suggest_due.is_some_and(|d| now >= d) {
             self.suggest_due = None;
             let q = self.search_text.trim().to_owned();
-            // An empty box signed in shows the account's recent searches.
-            if !q.is_empty() || self.logged_in {
-                self.backend.request(Req::Suggest { query: q, round: self.suggest_round });
+            match crate::link::parse(&q) {
+                // A link isn't searched for: its song shows instead.
+                Some(link) => {
+                    if matches!(link, Link::Song { .. }) && self.link_preview.as_ref().is_none_or(|(l, song)| *l != link || song.is_err()) {
+                        self.backend.request(Req::Link { link, to: LinkUse::Preview });
+                    }
+                }
+                // An empty box signed in shows the account's recent searches.
+                None if !q.is_empty() || self.logged_in => self.backend.request(Req::Suggest { query: q, round: self.suggest_round }),
+                None => {}
             }
         }
     }
@@ -165,7 +209,7 @@ impl App {
         }
     }
 
-    fn on_resp(&mut self, r: Resp, now: f64) {
+    fn on_resp(&mut self, ctx: &egui::Context, r: Resp, now: f64) {
         match r {
             Resp::Home(page) => self.on_home(page),
             Resp::HomeMore(page) => {
@@ -327,7 +371,13 @@ impl App {
                 }
             }
             Resp::Downloads(runs) => self.on_download_runs(runs),
-            Resp::ConfirmDownload { target, title, tracks, count } => self.dialog = Some(Dialog::ConfirmDownload { target, title, tracks, count }),
+            Resp::ConfirmDownload { target, title, tracks, count } => {
+                // Edit playlist's picked picture isn't shown any more.
+                if let Some(Dialog::EditPlaylist { cover: Some(super::NewCover::Picked(uri, _)), .. }) = &self.dialog {
+                    ctx.forget_image(uri);
+                }
+                self.dialog = Some(Dialog::ConfirmDownload { target, title, tracks, count });
+            }
             Resp::Uploaded { done, failed } => {
                 self.toast(match (done, failed.len()) {
                     (_, 0) => crate::tr!("status-upload-complete", count = done),
@@ -351,6 +401,17 @@ impl App {
                     self.lyrics = Some((video_id, lyrics));
                 }
             }
+            Resp::UnisonCredit { video_id, credits } => {
+                if let Some((id, set)) = &mut self.lyrics
+                    && *id == video_id
+                {
+                    for (provider, credit) in credits {
+                        if let Some(l) = set.sources.iter_mut().find(|l| l.provider == provider && l.unison.as_ref().is_some_and(|c| c.submitter.is_none())) {
+                            l.unison = Some(credit);
+                        }
+                    }
+                }
+            }
             Resp::CommentsPage { token, page } => super::comments::on_page(&token, page),
             Resp::ArtistPicture { id, pic } => {
                 self.artist_pics.insert(id, pic);
@@ -366,9 +427,15 @@ impl App {
                     self.lyrics_extras = Some((video_id, source, target, extras));
                 }
             }
-            Resp::Art { key, mut art } => {
-                if self.current_id() == Some(key.as_str()) {
+            Resp::Art { key, art } => {
+                // An older request's failure doesn't take away a cover already showing.
+                let covered = self.art_key.as_deref() == Some(key.as_str()) && !self.art_uncovered;
+                if self.current_id() == Some(key.as_str()) && (art.is_some() || !covered) {
+                    self.art_uncovered = art.is_none();
+                    // No cover: the idle backdrop's colours, not the song before's (#356).
+                    let mut art = art.unwrap_or_else(crate::art::idle);
                     crate::art::soften(&mut art, self.look().background.blur_passes.saturating_sub(6));
+                    self.mini.cover_changed();
                     self.track_art = Some(art);
                     self.art_key = Some(key);
                     // An animated cover on screen keeps its own colours.
@@ -400,6 +467,35 @@ impl App {
                     self.next();
                 } else if !self.buffering {
                     self.prefetch_next();
+                }
+            }
+            Resp::Link { link, to: LinkUse::Preview, found } => {
+                if crate::link::parse(&self.search_text).as_ref() == Some(&link) {
+                    self.link_preview = match found {
+                        Ok(LinkTo::Song(t)) => Some((link, Ok(t))),
+                        Ok(_) => None,
+                        // Drawn as it is under the search box, not through `toast`.
+                        Err(e) => Some((link, Err(super::without_urls(e)))),
+                    };
+                }
+            }
+            Resp::Link { found: Ok(LinkTo::Song(t)), to: LinkUse::Queue, .. } => self.apply(Action::Enqueue(t)),
+            Resp::Link { found: Err(e), to: LinkUse::Queue, .. } => self.toast(e),
+            Resp::Link { link, found, .. } => {
+                // Unless something else was asked for meanwhile.
+                if self.link_pending.take_if(|l| *l == link).is_none() {
+                    return;
+                }
+                match found {
+                    Err(e) => self.toast(e),
+                    Ok(LinkTo::Page(target)) => self.apply(Action::Open(target)),
+                    Ok(LinkTo::Song(t)) => self.play_linked(t),
+                    // Someone else's jam takes just the song.
+                    Ok(LinkTo::InList(_, mut tracks, i)) if self.jam.guest() => self.play_linked(tracks.swap_remove(i)),
+                    Ok(LinkTo::InList(source, tracks, i)) => {
+                        self.queue_source = Some(source);
+                        self.play_list(tracks, i);
+                    }
                 }
             }
             // Unless something else was asked to play meanwhile; shuffled as last asked.
@@ -554,6 +650,7 @@ impl App {
                 self.lists.edits.confirm_add(&id, &video_ids);
                 self.on_playlist_changed(id, PlaylistChange::Added);
             }
+            Resp::AlreadyInPlaylist { id, tracks } => self.already_in_playlist(id, tracks),
             Resp::AddedToPlaylist { id, video_ids, error: Some(e) } => {
                 // Shown as added: out again, and a reload makes sure of the rest.
                 self.lists.add_failed(&id, &video_ids);
@@ -625,7 +722,7 @@ impl App {
             }
             Resp::Channels(c) => self.channels = Some(c),
             Resp::SwitchedChannel { page_id, epoch, error } => {
-                let name = self.switching_to.take().unwrap_or_else(|| "another channel".to_owned());
+                let name = self.switching_to.take().unwrap_or_else(|| crate::tr!("status-another-channel").to_owned());
                 match error {
                     Some(e) => self.toast(e),
                     None => {
@@ -633,14 +730,36 @@ impl App {
                         // with the same channels: only which one is used changed.
                         let channels = self.channels.take().map(|c| crate::backend::Channels { current: page_id, epoch, ..c });
                         let asked = self.channels_asked;
-                        self.on_resp(Resp::LoggedIn(true), now);
+                        self.on_resp(ctx, Resp::LoggedIn(true), now);
                         (self.channels, self.channels_asked) = (channels, asked);
                         self.toast(crate::tr!("status-switched-channel", name = name.as_str()));
                     }
                 }
             }
             Resp::LoggedIn(v) => self.on_logged_in(v, now),
-            Resp::Error(e) => self.on_error(e),
+            // Only what the page was waiting for says why it failed, not some other request.
+            Resp::Error(e) => {
+                if self.page_waiting() {
+                    self.offline = false;
+                }
+                self.on_error(e);
+            }
+            // Back: the page that couldn't load loads, as Try again would. Should it still
+            // fail, the checks go on as far apart as they'd got.
+            Resp::Reachable(true) if self.offline && self.load_failed => {
+                let wait = self.online_wait;
+                self.refresh();
+                self.online_wait = wait;
+            }
+            Resp::Reachable(_) => {}
+            Resp::Offline => {
+                if self.page_waiting() {
+                    self.offline = true;
+                }
+                // On Downloads already, it doesn't point there.
+                let here = self.page == super::Page::Library(super::LibTab::Downloads);
+                self.on_error(super::offline_text(here).to_owned());
+            }
         }
     }
 
@@ -794,6 +913,8 @@ impl App {
         if change == PlaylistChange::Deleted {
             // Its load is dropped too, and the queue stops waiting for it.
             self.lists.forget(&id);
+            // Kept downloaded, it would be loaded at every launch, and fail each time.
+            self.kept_downloaded.retain(|k| *k != id);
             if self.queue.fill.as_ref().is_some_and(|f| f.id == id) {
                 self.queue.fill = None;
             }
@@ -861,6 +982,10 @@ impl App {
     fn on_logged_in(&mut self, v: bool, now: f64) {
         // An Undo made meanwhile was the last account's: it isn't sent as this one.
         self.undo = None;
+        // So is a question about adding to its playlist.
+        if matches!(self.dialog, Some(Dialog::ConfirmAddDuplicates { .. })) {
+            self.dialog = None;
+        }
         self.toast_after_unlike = None;
         self.ratings.reset();
         self.logged_in = v;
@@ -888,8 +1013,12 @@ impl App {
         self.lists.clear();
         self.lists.edits = Default::default();
         self.liked.clear();
+        // The playlists kept downloaded are the last account's (or channel's), maybe its
+        // private ones: they aren't loaded for this one. What's downloaded stays.
+        self.kept_downloaded.clear();
         self.queue.fill = None;
         self.play_pending = None;
+        (self.link_pending, self.link_preview) = (None, None);
         if self.page_list().is_some() || matches!(self.page, Page::Artist(_)) {
             self.refresh();
         }
@@ -908,6 +1037,11 @@ impl App {
     }
 
     /// A request failed: pages waiting for it stop waiting, and the error shows.
+    /// Whether the page is still waiting for its first data: an error now is its own.
+    fn page_waiting(&self) -> bool {
+        self.loading || (self.page == Page::Home && self.home_loading)
+    }
+
     fn on_error(&mut self, e: String) {
         if let Some(Dialog::Collaborate { info, busy, .. }) = &mut self.dialog {
             *busy = false;
@@ -917,7 +1051,7 @@ impl App {
             }
         }
         // A page still waiting for its first data shows a retry instead of loading forever.
-        self.load_failed |= self.loading || (self.page == Page::Home && self.home_loading);
+        self.load_failed |= self.page_waiting();
         self.loading = false;
         self.home_loading = false;
         self.radio_pending = false;

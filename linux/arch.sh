@@ -8,15 +8,27 @@
 set -euo pipefail
 
 version="${1:?usage: bash linux/arch.sh <version>}"
-# pkgver can't have a hyphen. A nightly (0.3.0-nightly.20261111) becomes
-# 0.3.0.nightly.20261111, which pacman puts after 0.3.0 and before the next version,
-# as in the app's own updater. The app looks for this name in the release.
-pkg_version="${version//-/.}"
+# pkgver can't have a hyphen. A nightly is named after the version it leads up to
+# (0.4.1-nightly.20261126): as 0.4.1nightly.20261126, with nothing between the version
+# and "nightly", pacman puts it before 0.4.1 and after the one before, as in the app's
+# own updater (a letter straight after the last number sorts before the end, as in
+# 1.0rc1; after a dot it would sort after). The file keeps the name copies before
+# 0.4.1 look for (ytm-rs-0.4.1.nightly.20261126-1-x86_64.pkg.tar.zst): pacman goes by
+# the version inside.
+pkg_version="${version/-nightly./nightly.}"
+file_version="${version//-/.}"
 
 if [[ ! "$pkg_version" =~ ^[0-9][0-9A-Za-z.+_]*$ ]]; then
   echo "Invalid Arch package version: $pkg_version" >&2
   exit 1
 fi
+# 2.0.x was a joke: from 0.4.0 on, epoch=1 puts a version after it, as the
+# app's updater does. makepkg puts it in the file's name (1:0.4.0); the release's
+# copy leaves it out.
+case $version in
+  2.0.*) epoch= ;;
+  *) epoch=1 ;;
+esac
 
 pacman -Syu --noconfirm --needed \
   base-devel git rust pkgconf clang cmake nasm \
@@ -40,8 +52,11 @@ arch=('x86_64')
 url='https://github.com/grapedjuice/ytm-rs'
 license=('GPL-3.0-only')
 # The libraries it links. The tray's appindicator is loaded at run time.
+# libssl.so and libcrypto.so: makepkg turns them into the major version the app was
+# linked against here (libssl.so=4-64), so pacman refuses the package on a system with
+# an older OpenSSL instead of installing one that can't start (#331).
 # desktop-file-utils builds the MIME cache that `ytm-rs://` links are found through.
-depends=('alsa-lib' 'gtk3' 'webkit2gtk-4.1' 'libayatana-appindicator' 'dbus' 'openssl' 'desktop-file-utils')
+depends=('alsa-lib' 'gtk3' 'webkit2gtk-4.1' 'libayatana-appindicator' 'dbus' 'openssl' 'libssl.so' 'libcrypto.so' 'desktop-file-utils')
 optdepends=('libpulse: Recognize song, through its parec')
 options=('!debug')
 
@@ -64,10 +79,12 @@ package() {
 PKGBUILD
 
 sed -i "s/^pkgver=.*/pkgver=$pkg_version/" _archpkg/PKGBUILD
+[ -z "$epoch" ] || sed -i "s/^pkgver=/epoch=$epoch\npkgver=/" _archpkg/PKGBUILD
 chown -R builder:builder _archpkg
 runuser -u builder -- bash -c \
   'cd /src/_archpkg && makepkg --force --noconfirm --nodeps'
 
-pkg="ytm-rs-$pkg_version-1-x86_64.pkg.tar.zst"
-cp "_archpkg/$pkg" out/
+pkg="ytm-rs-$file_version-1-x86_64.pkg.tar.zst"
+built="ytm-rs-${epoch:+$epoch:}$pkg_version-1-x86_64.pkg.tar.zst"
+cp "_archpkg/$built" "out/$pkg"
 ls -lh "out/$pkg"

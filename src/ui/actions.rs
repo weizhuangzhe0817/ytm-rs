@@ -3,7 +3,8 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use crate::backend::{Req, UnlikeVersions};
+use crate::backend::{LinkUse, Req, UnlikeVersions};
+use crate::link::Link;
 use crate::model::{Target, Track};
 
 use super::lists::{self, LIBRARY_SONGS, LIKED_MUSIC};
@@ -104,6 +105,7 @@ impl App {
             Action::PlayCollection(Target::Album(id) | Target::Playlist(id), shuffle) if self.opened(&id).is_some() => self.play_opened(id, shuffle),
             Action::PlayCollection(target, shuffle) => {
                 self.toast(crate::tr!("status-starting-playback"));
+                self.drop_pending_play();
                 self.play_pending = Some((target.clone(), shuffle));
                 match target {
                     Target::Playlist(id) => self.load_list(&id, false, false),
@@ -124,7 +126,7 @@ impl App {
             }
             Action::Open(Target::Song(t)) | Action::Radio(t) => {
                 self.queue_source = None;
-                self.play_list(vec![t.clone()], 0);
+                self.play_for_radio(t.clone());
                 if !self.radio_pending {
                     self.radio_pending = true;
                     self.backend.request(Req::Radio { song_of: self.song_of(&t), seed: t.id, smart: false });
@@ -135,6 +137,7 @@ impl App {
             Action::Open(Target::Playlist(id)) if id == LIBRARY_SONGS => self.go(Page::Library(LibTab::Saved)),
             Action::Open(Target::Playlist(id)) => self.go(Page::Playlist(id)),
             Action::Open(Target::Artist(id)) => self.go(Page::Artist(id)),
+            Action::OpenLink(link, queue) => self.open_link(link, queue),
             Action::PlayNext(t) | Action::Enqueue(t) | Action::QueueInsert { track: t, .. } if self.explicit_hidden(&t) => {}
             Action::PlayNext(t) => {
                 let start = self.queue.play_next(t);
@@ -158,9 +161,10 @@ impl App {
                 if i >= self.queue.tracks.len() {
                     return;
                 }
-                self.play_pending = None;
+                self.drop_pending_play();
                 self.queue.index = Some(i);
                 self.queue.drop_explicit();
+                self.picked = true;
                 self.play_current();
             }
             Action::QueueRemove(i) => {
@@ -208,6 +212,17 @@ impl App {
             Action::Seek(secs) => {
                 self.seek_to(Duration::from_secs_f32(secs.max(0.0)));
                 self.lyric_view.resume();
+            }
+            Action::LoopStart(_) | Action::LoopEnd(_) | Action::LoopClear => {
+                match a {
+                    Action::LoopStart(secs) => self.loop_start_at(secs),
+                    Action::LoopEnd(secs) => self.loop_end_at(secs),
+                    _ => self.ab_loop = None,
+                }
+                // A next song staged to follow on doesn't while it loops, and one held off
+                // near the end is due once it doesn't: staged again (or not) from here.
+                self.clear_staged();
+                self.audio.send(crate::audio::AudioCmd::ClearNext);
             }
             Action::Like(t, false) => self.request_unlike(Unlike::Track(t)),
             Action::Like(t, true) => {
@@ -276,8 +291,9 @@ impl App {
                 self.backend.request(Req::DownloadMany { target, title, tracks, confirmed: false });
             }
             Action::CancelDownload(key) => self.backend.cancel_downloads(&key),
+            Action::KeepDownloaded(id, on) => self.keep_downloaded(&id, on),
             Action::AddToPlaylist(tracks) => {
-                if self.logged_in { self.dialog = Some(Dialog::PickPlaylist(tracks)); }
+                if self.logged_in { self.dialog = Some(Dialog::PickPlaylist { tracks, query: String::new() }); }
                 else { self.toast(crate::tr!("status-sign-in-edit")); }
             }
             Action::RemoveFromPlaylist(mut rows) => {
@@ -330,9 +346,13 @@ impl App {
                 self.backend.request(Req::SortPlaylist { id, actions });
             }
             Action::EditPlaylist => {
+                // Not a picture picked for an Edit playlist that was closed since: a picker
+                // still open from then writes to the old slot.
+                self.picked_cover = Default::default();
                 if let Some(c) = self.current_collection().filter(|c| !c.is_album) {
                     self.dialog = Some(Dialog::EditPlaylist {
                         id: c.id.clone(), title: c.title.clone(), description: c.description.clone().unwrap_or_default(), privacy: None,
+                        thumbs: c.thumbs.clone(), cover: None,
                     });
                 }
             }
@@ -408,6 +428,46 @@ impl App {
         Some(QueueFill { id: id.to_owned(), load: o.load, ran_out: false })
     }
 
+    fn open_link(&mut self, link: Link, queue: bool) {
+        let known = self.link_preview.take().filter(|(l, _)| *l == link).and_then(|(_, song)| song.ok());
+        if crate::link::parse(&self.search_text).is_some() {
+            self.reset_search();
+        }
+        // Songs for the queue each go there; otherwise the newest link is the one that's wanted.
+        let queue = queue && matches!(link, Link::Song { .. });
+        if !queue {
+            self.link_pending = None;
+        }
+        match (&link, known) {
+            (Link::Page(target), _) => return self.apply(Action::Open(target.clone())),
+            (Link::Jam(code), _) => return jam::open_link(self, code.clone()),
+            (Link::Song { .. }, Some(t)) if queue => return self.apply(Action::Enqueue(t)),
+            (Link::Song { list: None, .. }, Some(t)) => return self.play_linked(t),
+            (Link::Song { .. }, _) if queue => return self.backend.request(Req::Link { link, to: LinkUse::Queue }),
+            (Link::Song { list, .. }, _) => {
+                // A whole playlist takes a moment.
+                if list.is_some() {
+                    self.toast(crate::tr!("status-starting-playback"));
+                }
+                self.drop_pending_play();
+            }
+            (Link::Resolve(_), _) => {}
+        }
+        self.link_pending = Some(link.clone());
+        self.backend.request(Req::Link { link, to: LinkUse::Open });
+    }
+
+    /// The song of a link: as from its card, but one that's on and paused goes on too.
+    pub(super) fn play_linked(&mut self, t: Track) {
+        let hidden = self.hide_explicit && t.explicit;
+        let paused = !hidden && !self.playing() && !self.jam.guest() && [self.current_id(), self.playing_id()].contains(&Some(t.id.as_str()));
+        self.drop_pending_play();
+        self.apply(Action::Open(Target::Song(t)));
+        if paused {
+            self.toggle();
+        }
+    }
+
     pub(super) fn shortcuts(&mut self, ctx: &egui::Context) {
         // Space or the arrows are being picked as a shortcut, not pressed.
         if self.hotkeys.capturing() {
@@ -453,6 +513,26 @@ impl App {
             )
         });
         let (space, back, fwd, next, prev, lyr, full, esc, vol_up, vol_down, mini, refresh, quit, undo) = i;
+        // ← and → seek, unless something on screen has them: a focused widget moves the
+        // focus with them (or its cursor, in a text box), and a menu, a dialog or the
+        // palette is in front of the player.
+        let covered = self.palette.is_open() || self.dialog.is_some() || egui::Popup::is_any_open(ctx) || ctx.memory(|m| m.top_modal_layer()).is_some();
+        if !typing && !covered {
+            let seeks: Vec<(bool, bool)> = ctx.input(|i| {
+                i.events
+                    .iter()
+                    .filter_map(|e| match e {
+                        egui::Event::Key { key: key @ (egui::Key::ArrowLeft | egui::Key::ArrowRight), pressed: true, repeat, modifiers, .. } if modifiers.is_none() => {
+                            Some((*key == egui::Key::ArrowLeft, *repeat))
+                        }
+                        _ => None,
+                    })
+                    .collect()
+            });
+            for (back, repeat) in seeks {
+                self.seek_by_key(ctx, back, repeat);
+            }
+        }
         if undo && self.undo.is_some() {
             self.actions.push(Action::Undo);
         }
@@ -496,6 +576,13 @@ impl App {
                 // Just the drag.
             } else if self.fullscreen {
                 self.set_fullscreen(ctx, false);
+            } else if self.settings_open && !self.np_open {
+                // A search first, then Settings itself.
+                if self.settings_query.is_empty() {
+                    self.settings_open = false;
+                } else {
+                    self.settings_query.clear();
+                }
             } else {
                 self.np_open = false;
             }

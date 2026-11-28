@@ -7,7 +7,7 @@ use std::sync::atomic::Ordering;
 use egui::{Align2, Color32, Rect, RichText, Sense, Ui, Vec2, pos2, vec2};
 
 use super::arrive;
-use super::widgets::{self, RowOpts, card, chip, h_scroll, named, paint_cover, pill, shelf_header, track_row};
+use super::widgets::{self, RowOpts, card, chip, h_scroll, named, paint_cover, pill, shelf_arrows, shelf_header, track_row};
 use super::find::{ListFind, Sort};
 use super::row_drag::{self, RowDrag};
 use super::{Action, App, LibTab, Page, Selection};
@@ -20,7 +20,7 @@ const CARD: f32 = 180.0;
 
 pub fn page(app: &mut App, ui: &mut Ui, now: f64) {
     arrive::page(ui.ctx(), app.page_changed);
-    let t = theme::ease_out(((now - app.page_changed) / 0.32) as f32);
+    let t = if theme::anim_off() { 1.0 } else { theme::ease_out(((now - app.page_changed) / theme::secs(0.32)) as f32) };
     let rise = app.look().app.page_rise_px * (1.0 - t);
     if rise > 0.0 {
         ui.add_space(rise);
@@ -43,11 +43,6 @@ pub fn page(app: &mut App, ui: &mut Ui, now: f64) {
     // Dev hook: YTM_SCROLL=<px> pins the page scroll, for screenshots of lower sections.
     if let Some(y) = super::dev_var("YTM_SCROLL").and_then(|v| v.parse::<f32>().ok()) {
         area = area.vertical_scroll_offset(y);
-    }
-    // Its list of categories stays put while one scrolls.
-    if page == Page::Settings {
-        settings(app, ui);
-        return;
     }
     let out = area.show(ui, |ui| {
         ui.set_max_width((ui.available_width() - 20.0).max(0.0));
@@ -134,12 +129,32 @@ impl Rows {
 /// request failed.
 fn placeholder(app: &mut App, ui: &mut Ui, now: f64, rows: usize, card: f32) {
     if app.load_failed {
-        ui.add_space(40.0);
-        ui.label(RichText::new(crate::tr!("nav-load-failed")).color(theme::text_dim()));
-        ui.add_space(12.0);
-        if pill(ui, crate::tr!("ui-try-again"), None, false).clicked() {
-            app.refresh();
+        // Offline: asked again quietly, less often the longer it lasts; reachable, it loads (#366).
+        if app.offline {
+            let mut next = *app.online_check.get_or_insert(now + app.online_wait);
+            if now >= next {
+                app.online_wait = (app.online_wait * 2.0).min(super::ONLINE_WAIT_MOST);
+                next = now + app.online_wait;
+                app.online_check = Some(next);
+                app.backend.request(crate::backend::Req::Reachable);
+            }
+            ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64((next - now).max(0.1)));
         }
+        ui.add_space(40.0);
+        let why = if app.offline { super::offline_text(false) } else { crate::tr!("nav-load-failed") };
+        ui.add(egui::Label::new(RichText::new(why).color(theme::text_dim())).wrap());
+        ui.add_space(12.0);
+        ui.horizontal(|ui| {
+            if pill(ui, crate::tr!("ui-try-again"), None, false).clicked() {
+                app.refresh();
+            }
+            if app.offline {
+                ui.add_space(8.0);
+                if pill(ui, LibTab::Downloads.label(), Some(icon::DOWNLOAD), false).clicked() {
+                    app.go(Page::Library(LibTab::Downloads));
+                }
+            }
+        });
     } else {
         widgets::skeleton(ui, now, rows, card);
     }
@@ -180,7 +195,7 @@ fn card_row(ui: &mut Ui, id: &str, title: &str, cards: &[Card], acts: &mut Vec<A
         return;
     }
     let g = arrive::group(ui, id);
-    let (l, r) = arrive::item(ui, g, 0, 10.0, |ui| shelf_header(ui, title, None, None, true));
+    let (l, r) = arrive::item(ui, g, 0, 10.0, |ui| shelf_header(ui, title, None, None, Some(shelf_arrows(ui, id, false))));
     let nudge = r as i32 - l as i32;
     h_scroll(ui, id, nudge, cards.len(), CARD, 18.0, |ui| {
         ui.spacing_mut().item_spacing.x = 18.0;
@@ -191,11 +206,12 @@ fn card_row(ui: &mut Ui, id: &str, title: &str, cards: &[Card], acts: &mut Vec<A
 }
 
 /// Songs laid out in columns of `rows`, scrolling sideways (Quick picks). Clicking a
-/// song starts its radio. Returns whether the arrows reached the end.
+/// song starts its radio. Returns whether the arrows reached the end, where there can be
+/// `more` to bring in.
 #[allow(clippy::too_many_arguments)]
-fn song_grid(ui: &mut Ui, rows_ctx: &Rows, liked: &HashSet<String>, acts: &mut Vec<Action>, id: &str, title: &str, strap: Option<&str>, tracks: &[Track], rows: usize) -> bool {
+fn song_grid(ui: &mut Ui, rows_ctx: &Rows, liked: &HashSet<String>, acts: &mut Vec<Action>, id: &str, title: &str, strap: Option<&str>, tracks: &[Track], rows: usize, more: bool) -> bool {
     let g = arrive::group(ui, id);
-    let (l, r) = arrive::item(ui, g, 0, 10.0, |ui| shelf_header(ui, title, strap, None, true));
+    let (l, r) = arrive::item(ui, g, 0, 10.0, |ui| shelf_header(ui, title, strap, None, Some(shelf_arrows(ui, id, more))));
     let nudge = r as i32 - l as i32;
     let col_w = (ui.available_width() / 2.6).clamp(300.0, 420.0);
     let tracks: Vec<&Track> = tracks.iter().filter(|t| rows_ctx.shows(t)).collect();
@@ -537,8 +553,10 @@ fn home(app: &mut App, ui: &mut Ui, now: f64) {
     }
     let mut more_picks = None;
     let picks = crate::model::quick_picks(&h.shelves, app.locale.hl);
+    // Each chip's feed scrolls on its own.
+    let chip = h.chips.iter().find(|c| c.selected).map(|c| c.title.as_str());
     for (i, s) in h.shelves.iter().enumerate() {
-        let id = format!("home-{i}-{}", s.title);
+        let id = format!("{:?}", ("home", i, &s.title, chip));
         let title = match s.title.as_str() {
             "Listen again" => tr!("nav-listen-again"),
             "Quick picks" => tr!("nav-quick-picks"),
@@ -555,8 +573,8 @@ fn home(app: &mut App, ui: &mut Ui, now: f64) {
                 cards_shelf(ui, &app.liked, &mut app.actions, &id, title, strap, thumb, &cards);
             }
             ShelfKind::Songs { tracks, rows: n } => {
-                let reached_end = song_grid(ui, &rows, &app.liked, &mut app.actions, &id, title, s.strapline.as_deref(), tracks, *n);
-                if picks == Some(i) && reached_end && !h.picks_loading && !h.picks_expanded {
+                let more = picks == Some(i) && !h.picks_loading && !h.picks_expanded;
+                if song_grid(ui, &rows, &app.liked, &mut app.actions, &id, title, s.strapline.as_deref(), tracks, *n, more) && more {
                     more_picks = tracks.last().map(|t| t.id.clone());
                 }
             }
@@ -578,7 +596,7 @@ fn home(app: &mut App, ui: &mut Ui, now: f64) {
 #[allow(clippy::too_many_arguments)]
 fn cards_shelf(ui: &mut Ui, liked: &HashSet<String>, acts: &mut Vec<Action>, id: &str, title: &str, strap: Option<&str>, thumb: Option<&str>, cards: &[&Card]) {
     let g = arrive::group(ui, id);
-    let (l, r) = arrive::item(ui, g, 0, 10.0, |ui| shelf_header(ui, title, strap, thumb, true));
+    let (l, r) = arrive::item(ui, g, 0, 10.0, |ui| shelf_header(ui, title, strap, thumb, Some(shelf_arrows(ui, id, false))));
     let nudge = r as i32 - l as i32;
     h_scroll(ui, id, nudge, cards.len(), CARD, 18.0, |ui| {
         ui.spacing_mut().item_spacing.x = 18.0;
@@ -601,7 +619,7 @@ fn explore(app: &mut App, ui: &mut Ui, now: f64) {
     let Some(e) = &app.explore else { return };
     card_row(ui, "ex-new", if app.logged_in { crate::tr!("nav-new-releases-for-you") } else { crate::tr!("nav-new-releases") }, &e.new_albums, &mut app.actions);
     if !e.top.is_empty() {
-        song_grid(ui, &rows, &app.liked, &mut app.actions, "ex-top", crate::tr!("nav-top-songs"), None, &e.top, 4);
+        song_grid(ui, &rows, &app.liked, &mut app.actions, "ex-top", crate::tr!("nav-top-songs"), None, &e.top, 4, false);
     }
     card_row(ui, "ex-charts", crate::tr!("nav-charts"), &e.charts, &mut app.actions);
     for g in &e.moods {
@@ -666,7 +684,7 @@ fn browse_label(title: &str) -> &str {
 /// A group of Moods & genres: its categories in as many columns as fit, each opening its page.
 fn mood_grid(ui: &mut Ui, g: &crate::ytm::MoodGroup, acts: &mut Vec<Action>) {
     let arr = arrive::group(ui, ("moods", &g.title));
-    arrive::item(ui, arr, 0, 10.0, |ui| shelf_header(ui, browse_label(&g.title), None, None, false));
+    arrive::item(ui, arr, 0, 10.0, |ui| shelf_header(ui, browse_label(&g.title), None, None, None));
     let gap = 14.0;
     let w = ui.available_width();
     let cols = ((w + gap) / (190.0 + gap)).floor().max(1.0);
@@ -712,7 +730,7 @@ fn mood(app: &mut App, ui: &mut Ui, params: &str, now: f64) {
     page_title(ui, browse_label(&m.title));
     let rows = Rows::new(app, now);
     for (i, s) in m.shelves.iter().enumerate() {
-        let id = format!("mood-{i}-{}", s.title);
+        let id = format!("{:?}", ("mood", i, &s.title, params));
         match &s.kind {
             ShelfKind::Cards(cards) => {
                 let cards: Vec<&Card> = cards.iter().filter(|c| !matches!(&c.target, Target::Song(t) if !rows.shows(t))).collect();
@@ -721,7 +739,7 @@ fn mood(app: &mut App, ui: &mut Ui, params: &str, now: f64) {
                 }
             }
             ShelfKind::Songs { tracks, rows: n } => {
-                song_grid(ui, &rows, &app.liked, &mut app.actions, &id, &s.title, s.strapline.as_deref(), tracks, *n);
+                song_grid(ui, &rows, &app.liked, &mut app.actions, &id, &s.title, s.strapline.as_deref(), tracks, *n, false);
             }
         }
     }
@@ -763,10 +781,13 @@ fn search(app: &mut App, ui: &mut Ui, q: &str, now: f64) {
     // Songs here can be dragged onto a playlist in the sidebar, but not into another order.
     let drag = &mut app.row_drag;
     let ids = |section: &str| egui::Id::unique(("search", section));
+    // Each search's shelves scroll on their own: one scrolled for an earlier query
+    // doesn't open scrolled here.
+    let shelf = |name: &str| format!("s-{name}-{scope:?}-{q}");
     let tracks: Vec<&Track> = r.tracks.iter().filter(|t| rows.shows(t)).collect();
     let videos: Vec<&Track> = r.videos.iter().filter(|t| rows.shows(t)).collect();
     let episodes: Vec<&Track> = r.episodes.iter().filter(|t| rows.shows(t)).collect();
-    if tracks.is_empty() && videos.is_empty() && r.artists.is_empty() && r.albums.is_empty() && r.playlists.is_empty() && r.podcasts.is_empty() && episodes.is_empty() {
+    if tracks.is_empty() && videos.is_empty() && r.artists.is_empty() && r.albums.is_empty() && r.playlists.is_empty() && r.community.is_empty() && r.podcasts.is_empty() && episodes.is_empty() {
         page_title(
             ui,
             match scope {
@@ -796,7 +817,18 @@ fn search(app: &mut App, ui: &mut Ui, q: &str, now: f64) {
     };
     let mut songs = |ui: &mut Ui, acts: &mut Vec<Action>| {
         ui.vertical(|ui| {
-            ui.label(RichText::new(crate::tr!("nav-songs")).font(theme::bold(24.0)));
+            ui.horizontal(|ui| {
+                // The pill's height from the start, so the heading is centred beside it.
+                if !pick && !tracks.is_empty() {
+                    ui.set_min_height(38.0);
+                }
+                ui.label(RichText::new(crate::tr!("nav-songs")).font(theme::bold(24.0)));
+                // A song played alone starts its radio; this plays the songs found, in order
+                // (these and More songs), as a list does.
+                if !pick && !tracks.is_empty() && pill(ui, crate::tr!("ui-play"), Some(icon::PLAY), true).clicked() {
+                    acts.push(Action::PlayFound(tracks.iter().map(|&t| t.clone()).collect(), 0));
+                }
+            });
             ui.add_space(8.0);
             let plays_col = tracks.iter().take(4).any(|t| t.plays.is_some());
             let g = arrive::group(ui, "search-songs");
@@ -827,8 +859,8 @@ fn search(app: &mut App, ui: &mut Ui, q: &str, now: f64) {
             songs(ui, acts);
         }
     }
-    card_row(ui, "s-artists", crate::tr!("nav-artists"), &r.artists, acts);
-    card_row(ui, "s-albums", crate::tr!("nav-albums"), &r.albums, acts);
+    card_row(ui, &shelf("artists"), crate::tr!("nav-artists"), &r.artists, acts);
+    card_row(ui, &shelf("albums"), crate::tr!("nav-albums"), &r.albums, acts);
     if !videos.is_empty() && !app.hide_search_videos {
         ui.add_space(26.0);
         ui.label(RichText::new(crate::tr!("nav-videos")).font(theme::bold(24.0)));
@@ -862,8 +894,9 @@ fn search(app: &mut App, ui: &mut Ui, q: &str, now: f64) {
         }
         row_drag::carry(ui, drag, ids("more"));
     }
-    card_row(ui, "s-pl", crate::tr!("nav-playlists"), &r.playlists, acts);
-    card_row(ui, "s-podcasts", crate::tr!("nav-podcasts"), &r.podcasts, acts);
+    card_row(ui, &shelf("pl"), crate::tr!("nav-playlists"), &r.playlists, acts);
+    card_row(ui, &shelf("community"), crate::tr!("nav-community-playlists"), &r.community, acts);
+    card_row(ui, &shelf("podcasts"), crate::tr!("nav-podcasts"), &r.podcasts, acts);
     if !episodes.is_empty() {
         ui.add_space(26.0);
         ui.label(RichText::new(crate::tr!("nav-episodes")).font(theme::bold(24.0)));
@@ -949,8 +982,7 @@ fn top_result(ui: &mut Ui, c: &Card, liked: bool, pick: bool, acts: &mut Vec<Act
         let label = if playing { tr!("player-pause-item", title = c.title.as_str()) } else { tr!("player-play-item", title = c.title.as_str()) };
         let p = named(ui.interact(pr, resp.id.with("play"), Sense::click()), &label).on_hover_cursor(egui::CursorIcon::PointingHand);
         ui.painter().circle_filled(pc, 26.0, theme::with_alpha(Color32::WHITE, 0.4 + 0.6 * h));
-        let nudge = if playing { 0.0 } else { 1.5 };
-        widgets::play_pause_glyph(ui, pc + vec2(nudge, 0.0), 10.0, Color32::from_gray(15), playing);
+        widgets::play_pause_glyph(ui, pc, 10.0, Color32::from_gray(15), playing);
         let behavior = if matches!(c.target, Target::Song(_)) { egui::PopupCloseBehavior::CloseOnClickOutside } else { egui::PopupCloseBehavior::CloseOnClick };
         // Right-click anywhere on the card opens its menu, even over the play button or a linked name.
         widgets::right_click_menu(&resp)
@@ -981,6 +1013,8 @@ fn collection(app: &mut App, ui: &mut Ui, id: &str, now: f64) {
     let rows = Rows::new(app, now);
     let downloaded = all_downloaded(app, id);
     let run = app.download_runs.iter().find(|r| r.key == id).map(|r| (r.done, r.total, r.cancelled));
+    // A playlist can be kept downloaded, signed in; an album doesn't change, so its Download is enough.
+    let kept = app.lists.get(id).filter(|o| app.logged_in && !o.c.is_album).map(|_| app.keeps_downloaded(id));
     let Some(o) = app.lists.get(id) else { return };
     // Sorted once all of it is here: until then it plays as it arrives.
     app.find.hold(&app.page, !o.complete);
@@ -1006,13 +1040,27 @@ fn collection(app: &mut App, ui: &mut Ui, id: &str, now: f64) {
         }
     }
     ui.add_space(18.0);
+    // Your own playlist's cover opens Edit playlist, where its picture changes too.
+    let editable = app.logged_in && !is_album && c.owned && !matches!(id, "LM" | "SE");
     ui.horizontal_top(|ui| {
-        let (img, img_resp) = ui.allocate_exact_size(Vec2::splat(232.0), Sense::hover());
+        let (img, img_resp) = ui.allocate_exact_size(Vec2::splat(232.0), if editable { Sense::click() } else { Sense::hover() });
         let img = if look.app.header_art_hover != 1.0 { Rect::from_center_size(img.center(), img.size() * (1.0 + (look.app.header_art_hover - 1.0) * theme::anim_bool(ui.ctx(), "header-art-h", img_resp.hovered(), 0.2))) } else { img };
         let [sy, sb, sa] = look.app.header_art_shadow.unwrap_or([0.0, 40.0, 0.5]);
         widgets::soft_shadow(ui, img.translate(vec2(0.0, sy)), 10.0, sb, sa);
         paint_cover(ui, img, &c.thumbs, theme::card_radius() + 2.0, 1.0);
         widgets::download_veil(ui, img, theme::card_radius() + 2.0, id);
+        // Over the download's veil, so the pencil isn't split by it.
+        if editable {
+            let resp = widgets::named(img_resp, tr!("dialog-edit-playlist")).on_hover_cursor(egui::CursorIcon::PointingHand);
+            let h = theme::anim_bool(ui.ctx(), resp.id.with("edit"), resp.hovered() || resp.has_focus(), 0.15);
+            if h > 0.0 {
+                ui.painter().rect_filled(img, theme::card_radius() + 2.0, theme::shade(0.45 * h));
+                super::vector::pencil(ui, img.center(), 36.0, theme::with_alpha(Color32::WHITE, h));
+            }
+            if resp.clicked() {
+                acts.push(Action::EditPlaylist);
+            }
+        }
         ui.add_space(26.0);
         ui.vertical(|ui| {
             let full = ui.available_width();
@@ -1106,6 +1154,11 @@ fn collection(app: &mut App, ui: &mut Ui, id: &str, now: f64) {
                             && widgets::menu_action(ui, Some(icon::FOLDER_OPEN), tr!("widget-show-in-folder"))
                         {
                             crate::downloads::show_list(id, tracks);
+                        }
+                        if let Some(kept) = kept
+                            && widgets::menu_choice(ui, crate::tr!("ui-keep-downloaded"), kept)
+                        {
+                            acts.push(Action::KeepDownloaded(id.to_owned(), !kept));
                         }
                         if own {
                             if widgets::menu_action(ui, Some(icon::SETTINGS), crate::tr!("ui-edit")) { acts.push(Action::EditPlaylist); }
@@ -1218,6 +1271,21 @@ fn artist(app: &mut App, ui: &mut Ui, id: &str, now: f64) {
     let drag = &mut app.row_drag;
     let top: Vec<Track> = a.top.iter().filter(|t| rows.shows(t)).cloned().collect();
     let top = &top;
+    // Videos stand in for Top songs on a channel with none shown (a user channel, a cover
+    // artist), whose page would be empty without them; an artist's page has its songs.
+    let videos: Vec<&Card> = if top.is_empty() {
+        a.videos.iter().filter(|c| !matches!(&c.target, Target::Song(t) if !rows.shows(t))).collect()
+    } else {
+        Vec::new()
+    };
+    let header_tracks: Vec<Track> = if !top.is_empty() {
+        top.clone()
+    } else {
+        videos.iter().filter_map(|c| match &c.target {
+            Target::Song(t) => Some(t.clone()),
+            _ => None,
+        }).collect()
+    };
     // An artist of your uploads: all your songs by them, as on the website.
     let uploaded = crate::ytm::uploaded(id);
     // Hero banner fading into the page.
@@ -1239,16 +1307,16 @@ fn artist(app: &mut App, ui: &mut Ui, id: &str, now: f64) {
     let base = hero.left_bottom() + vec2(28.0, -30.0);
     ui.painter().text(base - vec2(0.0, 44.0), Align2::LEFT_BOTTOM, &a.name, theme::bold(58.0), Color32::WHITE);
     if let Some(s) = a.subscribers {
-        ui.painter().text(base - vec2(0.0, 18.0), Align2::LEFT_BOTTOM, format!("{} subscribers", compact(s)), theme::regular(14.0), theme::text_dim());
+        ui.painter().text(base - vec2(0.0, 18.0), Align2::LEFT_BOTTOM, crate::tr!("status-subscribers", count = s, shown = crate::i18n::decimal(&compact(s))), theme::regular(14.0), theme::text_dim());
     }
     ui.add_space(18.0);
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 10.0;
-        play_pill(ui, acts, &Target::Artist(id.to_owned()), top, &app.find, &app.page);
-        if pill(ui, crate::tr!("ui-shuffle"), Some(icon::SHUFFLE), false).clicked() && !top.is_empty() {
-            acts.push(Action::Shuffle(top.clone()));
+        play_pill(ui, acts, &Target::Artist(id.to_owned()), &header_tracks, &app.find, &app.page);
+        if pill(ui, crate::tr!("ui-shuffle"), Some(icon::SHUFFLE), false).clicked() && !header_tracks.is_empty() {
+            acts.push(Action::Shuffle(header_tracks.clone()));
         }
-        if let Some(first) = top.first()
+        if let Some(first) = header_tracks.first()
             && pill(ui, crate::tr!("ui-radio"), Some(icon::RADIO), false).clicked() {
                 acts.push(Action::Radio(first.clone()));
             }
@@ -1304,16 +1372,19 @@ fn artist(app: &mut App, ui: &mut Ui, id: &str, now: f64) {
         }
         row_drag::carry(ui, drag, list);
     }
-    card_row(ui, "a-albums", crate::tr!("nav-albums-singles"), &a.albums, acts);
+    card_row(ui, &format!("a-albums-{id}"), crate::tr!("nav-albums-singles"), &a.albums, acts);
+    if !videos.is_empty() {
+        cards_shelf(ui, &app.liked, acts, &format!("a-videos-{id}"), crate::tr!("nav-videos"), None, None, &videos);
+    }
     // Their songs you've saved, less those hidden as explicit.
     let library: Vec<&Card> = a.library.iter().filter(|c| !matches!(&c.target, Target::Song(t) if !rows.shows(t))).collect();
     if !library.is_empty() {
-        cards_shelf(ui, &app.liked, acts, "a-lib", crate::tr!("nav-from-library"), None, None, &library);
+        cards_shelf(ui, &app.liked, acts, &format!("a-lib-{id}"), crate::tr!("nav-from-library"), None, None, &library);
     }
-    card_row(ui, "a-pl", crate::tr!("nav-featured-on"), &a.playlists, acts);
-    card_row(ui, "a-sim", crate::tr!("nav-similar-artists"), &a.similar, acts);
+    card_row(ui, &format!("a-pl-{id}"), crate::tr!("nav-featured-on"), &a.playlists, acts);
+    card_row(ui, &format!("a-sim-{id}"), crate::tr!("nav-similar-artists"), &a.similar, acts);
     if let Some(d) = a.description.as_deref().filter(|d| !d.trim().is_empty()) {
-        shelf_header(ui, crate::tr!("settings-about"), None, None, false);
+        shelf_header(ui, crate::tr!("settings-about"), None, None, None);
         let trimmed = d.trim();
         let g = widgets::galley_wrapped(ui, trimmed, theme::regular(14.5), theme::text_dim(), ui.available_width().min(820.0), 8);
         let resp = ui.label(g.clone());
@@ -1521,34 +1592,137 @@ fn library(app: &mut App, ui: &mut Ui, tab: LibTab, now: f64) {
 
 // ------------------------------------------------------------------ settings
 
-/// Settings' categories, listed beside the one on show.
+/// Settings' categories, listed in groups down the side of its sheet.
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 pub(super) enum SettingsTab {
+    Playback,
+    Sound,
+    Equalizer,
+    Lyrics,
+    Videos,
+    Content,
+    Themes,
+    Appearance,
+    Mini,
+    AppIcon,
     #[default]
     Account,
-    Playback,
-    Lyrics,
-    Appearance,
     Connections,
+    Discord,
     General,
+    Downloads,
     Shortcuts,
+    Advanced,
     About,
 }
 
+/// What a category's row shows beside its name: one of the icon font's glyphs, or a Lucide
+/// outline the font hasn't got.
+enum TabIcon {
+    Glyph(char),
+    Path(&'static str),
+}
+
+/// Lucide 0.460's outlines (ISC, as the icon font), as path data in its 24-unit box.
+mod tab_icons {
+    pub const SLIDERS: &str = "M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M2 14h4M10 8h4M18 16h4";
+    pub const CLAPPERBOARD: &str = "M20.2 6 3 11l-.9-2.4c-.3-1.1.3-2.2 1.3-2.5l13.5-4c1.1-.3 2.2.3 2.5 1.3ZM6.2 5.3l3.1 3.9M12.4 3.4l3.1 4M3 11h18v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z";
+    pub const SHIELD: &str = "M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z";
+    pub const PALETTE: &str = "M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.926 0 1.648-.746 1.648-1.688 0-.437-.18-.835-.437-1.125-.29-.289-.438-.652-.438-1.125a1.64 1.64 0 0 1 1.668-1.668h1.996c3.051 0 5.555-2.503 5.555-5.554C21.965 6.012 17.461 2 12 2zM13 6.5a.5.5 0 1 0 1 0a.5.5 0 1 0-1 0M17 10.5a.5.5 0 1 0 1 0a.5.5 0 1 0-1 0M8 7.5a.5.5 0 1 0 1 0a.5.5 0 1 0-1 0M6 12.5a.5.5 0 1 0 1 0a.5.5 0 1 0-1 0";
+    pub const PAINTBRUSH: &str = "M14.622 17.897l-10.68-2.913M18.376 2.622a1 1 0 1 1 3.002 3.002L17.36 9.643a.5.5 0 0 0 0 .707l.944.944a2.41 2.41 0 0 1 0 3.408l-.944.944a.5.5 0 0 1-.707 0L8.354 7.348a.5.5 0 0 1 0-.707l.944-.944a2.41 2.41 0 0 1 3.408 0l.944.944a.5.5 0 0 0 .707 0zM9 8c-1.804 2.71-3.97 3.46-6.583 3.948a.507.507 0 0 0-.302.819l7.32 8.883a1 1 0 0 0 1.185.204C12.735 20.405 16 16.792 16 15";
+    pub const IMAGE: &str = "M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2zM7 9a2 2 0 1 0 4 0a2 2 0 1 0-4 0M21 15l-3.086-3.086a2 2 0 0 0-2.828 0L6 21";
+    pub const GAMEPAD: &str = "M6 11h4M8 9v4M15 12h.01M18 10h.01M17.32 5H6.68a4 4 0 0 0-3.978 3.59c-.006.052-.01.101-.017.152C2.604 9.416 2 14.456 2 16a3 3 0 0 0 3 3c1 0 1.5-.5 2-1l1.414-1.414A2 2 0 0 1 9.828 16h4.344a2 2 0 0 1 1.414.586L17 18c.5.5 1 1 2 1a3 3 0 0 0 3-3c0-1.545-.604-6.584-.685-7.258-.007-.05-.011-.1-.017-.151A4 4 0 0 0 17.32 5z";
+    pub const KEYBOARD: &str = "M10 8h.01M12 12h.01M14 8h.01M16 12h.01M18 8h.01M6 8h.01M7 16h10M8 12h.01M4 4h16a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z";
+    pub const WRENCH: &str = "M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z";
+    pub const INFO: &str = "M2 12a10 10 0 1 0 20 0a10 10 0 1 0-20 0M12 16v-4M12 8h.01";
+}
+
 impl SettingsTab {
-    /// Most used first, which is how they're listed.
-    pub(super) const ALL: [Self; 8] = [Self::Account, Self::Playback, Self::Lyrics, Self::Appearance, Self::Connections, Self::General, Self::Shortcuts, Self::About];
+    /// In the order they're listed.
+    pub(super) const ALL: [Self; 18] = [
+        Self::Playback,
+        Self::Sound,
+        Self::Equalizer,
+        Self::Lyrics,
+        Self::Videos,
+        Self::Content,
+        Self::Themes,
+        Self::Appearance,
+        Self::Mini,
+        Self::AppIcon,
+        Self::Account,
+        Self::Connections,
+        Self::Discord,
+        Self::General,
+        Self::Downloads,
+        Self::Shortcuts,
+        Self::Advanced,
+        Self::About,
+    ];
+
+    /// The categories under their group's heading.
+    fn groups() -> [(&'static str, &'static [Self]); 4] {
+        use SettingsTab::*;
+        [
+            (tr!("settings-group-listening"), &[Playback, Sound, Equalizer, Lyrics, Videos, Content]),
+            (tr!("settings-group-look"), &[Themes, Appearance, Mini, AppIcon]),
+            (tr!("settings-group-accounts"), &[Account, Connections, Discord]),
+            (tr!("settings-group-app"), &[General, Downloads, Shortcuts, Advanced, About]),
+        ]
+    }
 
     pub(super) fn label(self) -> &'static str {
         match self {
             Self::Playback => tr!("settings-playback"),
+            Self::Sound => tr!("settings-sound"),
+            Self::Equalizer => tr!("settings-equalizer"),
             Self::Lyrics => tr!("settings-lyrics"),
+            Self::Videos => tr!("settings-music-videos"),
+            Self::Content => tr!("settings-content-and-ratings"),
+            Self::Themes => tr!("settings-themes"),
             Self::Appearance => tr!("settings-appearance"),
-            Self::Connections => tr!("settings-connections"),
+            Self::Mini => tr!("settings-mini-player"),
+            Self::AppIcon => tr!("settings-app-icon"),
             Self::Account => tr!("settings-account"),
+            Self::Connections => tr!("settings-connections"),
+            // A name, as its own section has it.
+            Self::Discord => "Discord",
             Self::General => tr!("settings-general"),
+            Self::Downloads => tr!("settings-downloads"),
             Self::Shortcuts => tr!("settings-keyboard-shortcuts"),
+            Self::Advanced => tr!("settings-advanced"),
             Self::About => tr!("settings-about"),
+        }
+    }
+
+    fn icon(self) -> TabIcon {
+        use TabIcon::{Glyph, Path};
+        match self {
+            Self::Playback => Glyph(icon::PLAY),
+            Self::Sound => Glyph(icon::VOLUME_2),
+            Self::Equalizer => Path(tab_icons::SLIDERS),
+            Self::Lyrics => Glyph(icon::MIC_VOCAL),
+            Self::Videos => Path(tab_icons::CLAPPERBOARD),
+            Self::Content => Path(tab_icons::SHIELD),
+            Self::Themes => Path(tab_icons::PALETTE),
+            Self::Appearance => Path(tab_icons::PAINTBRUSH),
+            Self::Mini => Glyph(icon::PICTURE_IN_PICTURE),
+            Self::AppIcon => Path(tab_icons::IMAGE),
+            Self::Account => Glyph(icon::CIRCLE_USER),
+            Self::Connections => Glyph(icon::LINK),
+            Self::Discord => Path(tab_icons::GAMEPAD),
+            Self::General => Glyph(icon::SETTINGS),
+            Self::Downloads => Glyph(icon::DOWNLOAD),
+            Self::Shortcuts => Path(tab_icons::KEYBOARD),
+            Self::Advanced => Path(tab_icons::WRENCH),
+            Self::About => Path(tab_icons::INFO),
+        }
+    }
+
+    fn paint_icon(self, ui: &Ui, center: egui::Pos2, size: f32, color: Color32) {
+        match self.icon() {
+            TabIcon::Glyph(g) => widgets::icon_at(ui, center, g, size, color),
+            TabIcon::Path(d) => super::vector::lucide(ui, d, center, size, color),
         }
     }
 }
@@ -1605,77 +1779,202 @@ pub(super) fn filter_show(ui: &mut Ui, text: &str) -> bool {
     true
 }
 
-/// A wide window has room for the categories beside what's in them; this is the page's
-/// width below which they go above it.
-const SETTINGS_SIDE_BY_SIDE: f32 = 680.0;
-const SETTINGS_RAIL: f32 = 200.0;
-const SETTINGS_GAP: f32 = 32.0;
-const SETTINGS_COLUMN: f32 = 800.0;
-const SETTINGS_SEARCH_H: f32 = 38.0;
+/// A window narrower than this has Settings fill it, its categories a page of their own.
+const SETTINGS_NARROW: f32 = 860.0;
+/// The sheet's largest size, for a big monitor.
+const SETTINGS_MAX: Vec2 = vec2(1180.0, 860.0);
+const SETTINGS_NAV: f32 = 236.0;
+const SETTINGS_HEAD: f32 = 56.0;
+const SETTINGS_COLUMN: f32 = 760.0;
+const SETTINGS_SEARCH_H: f32 = 34.0;
 
-fn settings(app: &mut App, ui: &mut Ui) {
+/// Settings, as a sheet over the app: its categories down the side and the one picked
+/// beside them. `region`: the window above the player bar, which stays usable under it.
+pub(super) fn settings_sheet(app: &mut App, ctx: &egui::Context, region: Rect) {
+    // Faded linearly: eased, it would hang on screen most of the way out.
+    let e = theme::anim_bool_linear(ctx, "settings-sheet", app.settings_open, 0.16);
+    if e <= 0.001 {
+        // Opened again, a narrow window starts at the list of categories.
+        app.settings_page = false;
+        return;
+    }
     let words: Vec<String> = app.settings_query.to_lowercase().split_whitespace().map(str::to_owned).collect();
     FILTER.set(SettingsFilter { words, ..Default::default() });
-    let full = ui.available_rect_before_wrap();
-    // Its rail and heading don't scroll: clear of a frosted top bar and floating player
-    // bar, which pages otherwise run under.
-    let full = full.with_min_y(full.top() + app.page_insets[0]).with_max_y(full.bottom() - app.page_insets[1]);
-    let side_by_side = full.width() >= SETTINGS_SIDE_BY_SIDE;
-    let used = SETTINGS_RAIL + SETTINGS_GAP + SETTINGS_COLUMN;
-    let left = full.left() + ((full.width() - used) / 2.0).max(0.0);
-    let top_down = egui::Layout::top_down(egui::Align::Min);
-    let body = if side_by_side {
-        let rail = Rect::from_min_max(pos2(left, full.top()), pos2(left + SETTINGS_RAIL, full.bottom()));
-        settings_rail(app, &mut ui.new_child(egui::UiBuilder::new().max_rect(rail).layout(top_down)));
-        Rect::from_min_max(pos2(rail.right() + SETTINGS_GAP, full.top()), full.max)
+    let narrow = region.width() < SETTINGS_NARROW;
+    // Clear of the window's own buttons, which stay over it.
+    let top = if super::titlebar::custom() || cfg!(target_os = "macos") { 44.0 } else { 16.0 };
+    let sheet = if narrow {
+        region.with_min_y(region.top() + top)
     } else {
-        let mut head = ui.new_child(egui::UiBuilder::new().max_rect(full.shrink2(vec2(16.0, 0.0))).layout(top_down));
-        settings_head(app, &mut head);
-        head.horizontal_wrapped(|ui| {
-            let mut pick = None;
-            for t in SettingsTab::ALL {
-                if chip(ui, t.label(), !filtering() && t == app.settings_tab).clicked() {
-                    pick = Some(t);
+        let room = Rect::from_min_max(pos2(region.left() + 32.0, region.top() + top), pos2(region.right() - 32.0, region.bottom() - 20.0));
+        Rect::from_center_size(room.center(), room.size().min(SETTINGS_MAX))
+    };
+    let sheet = sheet.translate(vec2(0.0, (1.0 - theme::ease_out(e)) * 14.0));
+    // Over the queue, when it floats over the page too.
+    ctx.move_to_top(egui::LayerId::new(egui::Order::Middle, egui::Id::unique("settings-sheet")));
+    egui::Area::new(egui::Id::unique("settings-sheet")).order(egui::Order::Middle).fixed_pos(region.min).constrain(false).show(ctx, |ui| {
+        ui.set_clip_rect(region);
+        // The app shows through, dimmed, and a click on it closes Settings.
+        let scrim = ui.allocate_rect(region, Sense::click());
+        ui.painter().rect_filled(region, 0.0, theme::shade(0.45 * e));
+        super::titlebar::drag_area(ui, Rect::from_min_size(region.min, vec2(region.width(), top)), "settings-scrim");
+        ui.multiply_opacity(e);
+        let frame = super::notes::surface();
+        let [r, g, b, _] = frame.fill.to_srgba_unmultiplied();
+        let radius = if narrow { egui::CornerRadius { nw: frame.corner_radius.nw, ne: frame.corner_radius.ne, sw: 0, se: 0 } } else { frame.corner_radius };
+        let frame = frame.fill(Color32::from_rgb(r, g, b)).corner_radius(radius);
+        ui.painter().add(if narrow { frame.shadow(egui::epaint::Shadow::NONE) } else { frame }.paint(sheet));
+        // Clicks on the sheet are its own.
+        ui.interact(sheet, ui.scope_id().with("sheet"), Sense::click());
+        let line = egui::Stroke::new(1.0, theme::glass(0.07));
+        if narrow {
+            settings_header(app, ui, Rect::from_min_size(sheet.min, vec2(sheet.width(), SETTINGS_HEAD)), true);
+            ui.painter().hline(sheet.x_range(), sheet.top() + SETTINGS_HEAD, line);
+            let below = sheet.with_min_y(sheet.top() + SETTINGS_HEAD + 1.0);
+            if app.settings_page && !filtering() {
+                settings_body(app, ui, below);
+            } else {
+                let mut search = ui.new_child(egui::UiBuilder::new().max_rect(below.shrink2(vec2(16.0, 12.0))).layout(egui::Layout::top_down(egui::Align::Min)));
+                settings_search(app, &mut search);
+                let rest = below.with_min_y(search.min_rect().bottom() + 6.0);
+                if filtering() {
+                    settings_body(app, ui, rest);
+                } else {
+                    settings_nav(app, &mut ui.new_child(egui::UiBuilder::new().max_rect(rest.shrink2(vec2(10.0, 0.0)))), true);
                 }
             }
-            if let Some(t) = pick {
-                settings_open(app, t);
+        } else {
+            let nav = sheet.with_max_x(sheet.left() + SETTINGS_NAV);
+            let rr = egui::CornerRadius { nw: radius.nw, sw: radius.sw, ne: 0, se: 0 };
+            ui.painter().rect_filled(nav, rr, theme::glass(0.03));
+            ui.painter().vline(nav.right(), nav.y_range(), line);
+            let mut side = ui.new_child(egui::UiBuilder::new().max_rect(nav.shrink2(vec2(12.0, 14.0))).layout(egui::Layout::top_down(egui::Align::Min)));
+            settings_search(app, &mut side);
+            side.add_space(6.0);
+            settings_nav(app, &mut side, false);
+            let main = sheet.with_min_x(nav.right() + 1.0);
+            settings_header(app, ui, Rect::from_min_size(main.min, vec2(main.width(), SETTINGS_HEAD)), false);
+            ui.painter().hline(main.x_range(), main.top() + SETTINGS_HEAD, line);
+            settings_body(app, ui, main.with_min_y(main.top() + SETTINGS_HEAD + 1.0));
+        }
+        if scrim.clicked() {
+            app.settings_open = false;
+        }
+    });
+    FILTER.take();
+}
+
+/// Above what's on show: where it is, and what closes it. A restart that settings changed
+/// here are waiting on is a button in it, so nothing on the page moves for it.
+fn settings_header(app: &mut App, ui: &mut Ui, rect: Rect, narrow: bool) {
+    let mut row = ui.new_child(egui::UiBuilder::new().max_rect(rect.shrink2(vec2(if narrow { 10.0 } else { 24.0 }, 0.0))).layout(egui::Layout::left_to_right(egui::Align::Center)));
+    let page = if filtering() { tr!("settings-search-results") } else { app.settings_tab.label() };
+    if !narrow {
+        row.label(RichText::new(tr!("settings-title")).font(theme::regular(14.5)).color(theme::text_dim()));
+        widgets::icon_at(&row, pos2(row.cursor().left() + 11.0, rect.center().y), icon::CHEVRON_RIGHT, 14.0, theme::text_faint());
+        row.add_space(22.0);
+        row.label(RichText::new(page).font(theme::semibold(14.5)).color(theme::text()));
+    } else if app.settings_page && !filtering() {
+        if widgets::icon_button(&mut row, icon::CHEVRON_LEFT, 18.0, crate::tr!("nav-back"), false).clicked() {
+            app.settings_page = false;
+        }
+        row.label(RichText::new(page).font(theme::bold(17.0)).color(theme::text()));
+    } else {
+        row.add_space(6.0);
+        row.label(RichText::new(tr!("settings-title")).font(theme::bold(19.0)).color(theme::text()));
+    }
+    row.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        if widgets::icon_button(ui, icon::X, 16.0, crate::tr!("ui-close"), false).clicked() {
+            app.settings_open = false;
+        }
+        let why = restart_reasons(app);
+        if !why.is_empty() {
+            ui.add_space(6.0);
+            if pill(ui, tr!("settings-restart-to-apply"), None, true).on_hover_text(why.join("\n\n")).clicked() {
+                app.restart(ui.ctx());
             }
-        });
-        Rect::from_min_max(pos2(full.left() + 16.0, head.min_rect().bottom()), full.max)
-    };
+        }
+    });
+}
+
+/// What's been changed that only takes effect from the next start, as each one says it.
+fn restart_reasons(app: &App) -> Vec<&'static str> {
+    use super::mini;
+    use crate::renderer::{self, Renderer};
+    let dir = app.backend.data_dir();
+    let opengl = renderer::active() == Renderer::OpenGl;
+    let mut why = Vec::new();
+    if crate::i18n::resolve(app.language.as_deref()) != crate::i18n::current() {
+        why.push(tr!("settings-language-restart-desc"));
+    }
+    // A Wayland window can only be minimized, and can't bring itself back: from the next
+    // start the app opens an X11 window instead while this is on.
+    if app.close_to_tray && crate::wayland_window() {
+        why.push(tr!("settings-close-to-tray-restart-desc"));
+    }
+    if cfg!(target_os = "linux") && super::titlebar::Choice::load(dir).own_here() != super::titlebar::custom() && std::env::var_os("YTM_NATIVE_TITLEBAR").is_none() {
+        why.push(tr!("settings-title-bar-restart-desc"));
+    }
+    if app.wgpu_renderer != (renderer::active() == Renderer::Wgpu) {
+        why.push(tr!("settings-renderer-restart-desc"));
+    }
+    // The window type follows from the next start (Close to tray's covers it on).
+    if crate::wayland_session() && app.mini_x11 == crate::wayland_window() && !app.close_to_tray {
+        why.push(tr!("settings-keep-on-top-wayland-restart-desc"));
+    }
+    if opengl && mini::pill_saved(dir) != mini::pill_active() {
+        why.push(tr!("settings-pill-mini-player-restart-desc"));
+    }
+    if opengl && crate::backdrop::supported() && crate::backdrop::load(dir) != crate::backdrop::active() {
+        why.push(tr!("settings-window-material-restart-desc"));
+    }
+    if app.proxy_saved != *crate::proxy::active() {
+        why.push(tr!("settings-proxy-restart-desc"));
+    }
+    why
+}
+
+/// The settings on show, in a column down the middle of `rect`; in a search, every one
+/// that matches.
+fn settings_body(app: &mut App, ui: &mut Ui, rect: Rect) {
     let mut area = egui::ScrollArea::vertical().id_salt(("settings", if filtering() { None } else { Some(app.settings_tab.label()) })).auto_shrink(false);
     // Dev hook: YTM_SCROLL=<px> pins the page scroll, for screenshots of lower sections.
     if let Some(y) = super::dev_var("YTM_SCROLL").and_then(|v| v.parse::<f32>().ok()) {
         area = area.vertical_scroll_offset(y);
     }
-    let mut column = ui.new_child(egui::UiBuilder::new().max_rect(body).layout(top_down));
+    let mut column = ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(egui::Layout::top_down(egui::Align::Min)));
+    column.set_clip_rect(rect.intersect(ui.clip_rect()));
     area.show_viewport(&mut column, |ui, viewport| {
-        ui.set_max_width((ui.available_width() - 20.0).clamp(0.0, SETTINGS_COLUMN));
-        if filtering() {
-            for tab in SettingsTab::ALL {
-                FILTER.with_borrow_mut(|f| f.tab = tab.label());
-                settings_tab(app, ui, tab);
+        let w = ui.available_width();
+        let col = (w - 48.0).clamp(0.0, SETTINGS_COLUMN);
+        let side = ((w - col) / 2.0).min(127.0) as i8;
+        egui::Frame::new().inner_margin(egui::Margin { left: side, right: side, top: 0, bottom: 0 }).show(ui, |ui| {
+            ui.set_width(col);
+            if filtering() {
+                for tab in SettingsTab::ALL {
+                    FILTER.with_borrow_mut(|f| f.tab = tab.label());
+                    settings_tab(app, ui, tab);
+                }
+                if FILTER.with_borrow(|f| f.total == 0) {
+                    ui.add_space(40.0);
+                    ui.label(RichText::new(tr!("settings-no-match", query = app.settings_query.trim())).font(theme::regular(14.0)).color(theme::text_dim()));
+                }
+            } else {
+                FILTER.with_borrow_mut(|f| f.tab = app.settings_tab.label());
+                settings_tab(app, ui, app.settings_tab);
             }
-            if FILTER.with_borrow(|f| f.total == 0) {
-                ui.add_space(40.0);
-                ui.label(RichText::new(tr!("settings-no-match", query = app.settings_query.trim())).font(theme::regular(14.0)).color(theme::text_dim()));
-            }
-        } else {
-            settings_tab(app, ui, app.settings_tab);
-        }
-        ui.add_space(40.0);
+            ui.add_space(32.0);
+        });
         // A search's results follow what's typed.
         if !filtering() {
-            let h = ui.min_rect().height();
+            // The space the room's own spacing takes counts too: a short page doesn't scroll.
+            let h = ui.min_rect().height() + ui.spacing().item_spacing.y;
             let room = settle_room(ui.ctx(), viewport.bottom() - h, (viewport.height() - h).max(0.0), h);
             if room > 0.0 {
                 ui.add_space(room);
             }
         }
     });
-    ui.advance_cursor_after_rect(full);
-    FILTER.take();
 }
 
 /// Empty room under the settings, `h` tall now, when a section folds away (Discord's,
@@ -1703,7 +2002,7 @@ fn settle_room(ctx: &egui::Context, needed: f32, fill: f32, h: f32) -> f32 {
     }
     s.h = h;
     ctx.data_mut(|d| d.insert_temp(id, s));
-    let t = ((now - s.since) / SECS) as f32;
+    let t = ((now - s.since) / theme::secs(SECS)) as f32;
     // Scrolling back up meanwhile gives it back sooner.
     let room = (fill + s.scroll * (1.0 - theme::ease_in_out(t.clamp(0.0, 1.0)))).min(needed);
     if t < 1.0 && s.scroll > 0.0 {
@@ -1716,35 +2015,45 @@ fn settle_room(ctx: &egui::Context, needed: f32, fill: f32, h: f32) -> f32 {
 fn settings_open(app: &mut App, tab: SettingsTab) {
     app.settings_tab = tab;
     app.settings_query.clear();
+    app.settings_page = true;
 }
 
 fn settings_tab(app: &mut App, ui: &mut Ui, tab: SettingsTab) {
     match tab {
-        SettingsTab::Playback => settings_playback(app, ui),
-        SettingsTab::Lyrics => settings_lyrics(app, ui),
-        SettingsTab::Appearance => {
-            settings_appearance(app, ui);
-            settings_mini(app, ui);
-            settings_app_icon(app, ui);
+        SettingsTab::Playback => {
+            settings_playback(app, ui);
+            settings_tempo(app, ui);
         }
+        SettingsTab::Sound => settings_sound(app, ui),
+        SettingsTab::Equalizer => settings_equalizer(app, ui),
+        SettingsTab::Lyrics => settings_lyrics(app, ui),
+        SettingsTab::Videos => settings_videos(app, ui),
+        SettingsTab::Content => settings_content(app, ui),
+        SettingsTab::Themes => settings_themes(app, ui),
+        SettingsTab::Appearance => settings_appearance(app, ui),
+        SettingsTab::Mini => settings_mini(app, ui),
+        SettingsTab::AppIcon => settings_app_icon(app, ui),
         SettingsTab::Account => settings_account(app, ui),
         SettingsTab::Connections => {
             settings_connections(app, ui);
-            super::presence::settings(app, ui);
+            super::transfer::settings_section(app, ui);
         }
+        SettingsTab::Discord => super::presence::settings(app, ui),
         SettingsTab::General => {
             settings_language(app, ui);
             settings_song_info(app, ui);
             settings_window(app, ui);
-            settings_downloads(app, ui);
-            super::transfer::settings_section(app, ui);
-            settings_section(ui, tr!("settings-network"), None, None, |ui| network(app, ui));
-            // Last, as most apps keep it.
-            settings_storage(app, ui);
         }
+        SettingsTab::Downloads => settings_downloads(app, ui),
         SettingsTab::Shortcuts => {
             super::hotkeys::settings_section(app, ui);
             settings_shortcuts(ui);
+        }
+        SettingsTab::Advanced => {
+            settings_advanced(app, ui);
+            settings_section(ui, tr!("settings-network"), None, None, |ui| network(app, ui));
+            // Last, as most apps keep it.
+            settings_storage(app, ui);
         }
         SettingsTab::About => {
             settings_updates(app, ui);
@@ -1756,80 +2065,85 @@ fn settings_tab(app: &mut App, ui: &mut Ui, tab: SettingsTab) {
     }
 }
 
-/// The page's title and its search box.
-fn settings_head(app: &mut App, ui: &mut Ui) {
-    let title = tr!("settings-title");
-    let mut font = theme::bold(34.0);
-    let width = ui.painter().layout_no_wrap(title.to_owned(), font.clone(), theme::text()).size().x;
-    let available = ui.available_width() - 2.0;
-    if width > available {
-        font.size = (font.size * available / width).max(20.0);
-    }
-    ui.add_space(14.0);
-    ui.label(RichText::new(title).font(font).color(theme::text()));
-    ui.add_space(12.0);
-    settings_search(app, ui);
-    ui.add_space(14.0);
-}
-
-/// The title, the search box and the categories, on a wide window.
-fn settings_rail(app: &mut App, ui: &mut Ui) {
-    settings_head(app, ui);
+/// The categories under their groups' headings. `chevrons`: a narrow window's list, where
+/// each one opens as a page of its own.
+fn settings_nav(app: &mut App, ui: &mut Ui, chevrons: bool) {
+    let accent = app.accent_color();
     let mut pick = None;
-    for t in SettingsTab::ALL {
-        if settings_rail_row(ui, t.label(), !filtering() && t == app.settings_tab).clicked() {
-            pick = Some(t);
+    egui::ScrollArea::vertical().id_salt("settings-nav").auto_shrink(false).show(ui, |ui| {
+        ui.spacing_mut().item_spacing.y = 2.0;
+        for (i, (group, tabs)) in SettingsTab::groups().into_iter().enumerate() {
+            let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), if i == 0 { 24.0 } else { 34.0 }), Sense::hover());
+            ui.painter().text(pos2(rect.left() + 10.0, rect.bottom() - 7.0), Align2::LEFT_BOTTOM, group, theme::semibold(12.0), theme::text_faint());
+            for &tab in tabs {
+                let selected = !chevrons && !filtering() && tab == app.settings_tab;
+                if settings_nav_row(ui, tab, selected, chevrons, accent).clicked() {
+                    pick = Some(tab);
+                }
+            }
         }
-    }
+        ui.add_space(10.0);
+    });
     if let Some(t) = pick {
         settings_open(app, t);
     }
 }
 
-fn settings_rail_row(ui: &mut Ui, label: &str, selected: bool) -> egui::Response {
-    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 40.0), Sense::click());
-    let resp = named(resp, label).on_hover_cursor(egui::CursorIcon::PointingHand);
-    let h = theme::anim_bool(ui.ctx(), resp.id.with("h"), resp.hovered(), 0.15);
+fn settings_nav_row(ui: &mut Ui, tab: SettingsTab, selected: bool, chevron: bool, accent: Color32) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), if chevron { 44.0 } else { 32.0 }), Sense::click());
+    let resp = named(resp, tab.label()).on_hover_cursor(egui::CursorIcon::PointingHand);
+    let h = theme::anim_bool(ui.ctx(), resp.id.with("h"), resp.hovered(), 0.12);
     let s = theme::anim_bool(ui.ctx(), resp.id.with("s"), selected, 0.15);
     if h + s > 0.0 {
-        ui.painter().rect_filled(rect, 10.0, theme::glass(0.05 * h + 0.10 * s));
+        ui.painter().rect_filled(rect, 8.0, theme::glass(0.05 * h + 0.09 * s));
     }
     let color = theme::lerp_color(theme::text_dim(), theme::text(), h.max(s));
-    ui.painter().text(pos2(rect.left() + 14.0, rect.center().y), Align2::LEFT_CENTER, label, theme::semibold(14.0), color);
+    tab.paint_icon(ui, pos2(rect.left() + 20.0, rect.center().y), 16.0, theme::lerp_color(color, accent, s));
+    let label = ui.painter().with_clip_rect(rect.shrink(2.0).intersect(ui.clip_rect()));
+    label.text(pos2(rect.left() + 40.0, rect.center().y), Align2::LEFT_CENTER, tab.label(), theme::semibold(13.5), color);
+    if chevron {
+        widgets::icon_at(ui, pos2(rect.right() - 16.0, rect.center().y), icon::CHEVRON_RIGHT, 15.0, theme::text_faint());
+    }
     resp
 }
 
 fn settings_search(app: &mut App, ui: &mut Ui) {
     let (rect, field) = ui.allocate_exact_size(vec2(ui.available_width(), SETTINGS_SEARCH_H), Sense::click());
     let field = field.on_hover_cursor(egui::CursorIcon::Text);
-    ui.painter().rect_filled(rect, SETTINGS_SEARCH_H / 2.0, theme::glass(0.09));
-    widgets::icon_at(ui, pos2(rect.left() + 18.0, rect.center().y), icon::SEARCH, 15.0, theme::text_dim());
+    ui.painter().rect_filled(rect, 9.0, theme::glass(0.07));
+    widgets::icon_at(ui, pos2(rect.left() + 16.0, rect.center().y), icon::SEARCH, 14.0, theme::text_dim());
     let clearable = !app.settings_query.is_empty();
-    let end = rect.right() - if clearable { 34.0 } else { 12.0 };
-    let inner = Rect::from_min_max(pos2(rect.left() + 34.0, rect.top() + 3.0), pos2(end, rect.bottom() - 3.0));
+    let end = rect.right() - if clearable { 32.0 } else { 34.0 };
+    let inner = Rect::from_min_max(pos2(rect.left() + 31.0, rect.top() + 3.0), pos2(end, rect.bottom() - 3.0));
     let edit = ui.put(
         inner,
         egui::TextEdit::singleline(&mut app.settings_query)
+            .id(egui::Id::unique("settings-search"))
             .hint_text(widgets::ui_text(tr!("settings-search-box"), egui::TextStyle::Body.resolve(ui.style()), theme::text_faint()))
-            .font(theme::regular(14.0))
+            .font(theme::regular(13.5))
             .frame(egui::Frame::NONE)
             .align(Align2::LEFT_CENTER)
             .desired_width(inner.width()),
     );
     if clearable {
-        let x = Rect::from_center_size(pos2(rect.right() - 19.0, rect.center().y), Vec2::splat(26.0));
+        let x = Rect::from_center_size(pos2(rect.right() - 17.0, rect.center().y), Vec2::splat(24.0));
         let resp = named(ui.interact(x, ui.scope_id().with("settings-clear"), Sense::click()), tr!("settings-clear")).on_hover_cursor(egui::CursorIcon::PointingHand);
         let h = theme::anim_bool(ui.ctx(), resp.id.with("h"), resp.hovered(), 0.15);
         if h > 0.0 {
-            ui.painter().circle_filled(x.center(), 13.0, theme::glass(0.10 * h));
+            ui.painter().circle_filled(x.center(), 12.0, theme::glass(0.10 * h));
         }
-        widgets::icon_at(ui, x.center(), icon::X, 14.0, theme::lerp_color(theme::text_dim(), theme::text(), h));
+        widgets::icon_at(ui, x.center(), icon::X, 13.0, theme::lerp_color(theme::text_dim(), theme::text(), h));
         if resp.clicked() {
             app.settings_query.clear();
             edit.request_focus();
         }
+    } else if !edit.has_focus() {
+        // `/` goes to the search box, as on the web.
+        let key = Rect::from_center_size(pos2(rect.right() - 17.0, rect.center().y), vec2(18.0, 18.0));
+        ui.painter().rect_stroke(key, 4.0, egui::Stroke::new(1.0, theme::glass(0.16)), egui::StrokeKind::Inside);
+        ui.painter().text(key.center(), Align2::CENTER_CENTER, "/", theme::semibold(11.0), theme::text_faint());
     }
-    if field.clicked() {
+    if field.clicked() || (!ui.ctx().egui_wants_keyboard_input() && ui.input(|i| i.key_pressed(egui::Key::Slash))) {
         edit.request_focus();
     }
     // Esc takes the focus from a text box: it clears this one too.
@@ -1852,7 +2166,8 @@ fn settings_account(app: &mut App, ui: &mut Ui) {
     settings_section(ui, tr!("settings-account"), None, None, |ui| {
         if app.logged_in {
             let name = app.account_name.clone().unwrap_or_else(|| "YouTube Music".to_owned());
-            setting_row(ui, &name, Some(tr!("settings-signed-in-desc")), |ui| {
+            let desc = if cfg!(windows) { tr!("settings-signed-in-desc") } else { tr!("settings-signed-in-desc-system") };
+            setting_row(ui, &name, Some(desc), |ui| {
                 sign_out = pill(ui, tr!("settings-sign-out"), Some(icon::LOG_OUT), false).clicked();
             });
             // Also with one, when the one in use isn't it (a brand channel since deleted).
@@ -1977,7 +2292,12 @@ fn settings_playback(app: &mut App, ui: &mut Ui) {
                 app.audio.set_skip_silence(app.skip_silence);
             }
         });
-        divider(ui);
+    });
+}
+
+/// Settings › Content & ratings: what's shown, and what a like or dislike does.
+fn settings_content(app: &mut App, ui: &mut Ui) {
+    settings_section(ui, tr!("settings-content"), None, None, |ui| {
         setting_row(ui, tr!("settings-hide-explicit-songs"), Some(tr!("settings-hide-explicit-songs-desc")), |ui| {
             if toggle(ui, &mut app.hide_explicit, tr!("settings-hide-explicit-songs")).changed() {
                 app.set_hide_explicit();
@@ -2036,6 +2356,10 @@ fn settings_playback(app: &mut App, ui: &mut Ui) {
             });
         });
     });
+}
+
+/// Settings › Sound.
+fn settings_sound(app: &mut App, ui: &mut Ui) {
     settings_section(ui, tr!("settings-sound"), None, None, |ui| {
         let desc = normalization_desc(app);
         setting_row(ui, tr!("settings-volume-normalization"), Some(&desc), |ui| {
@@ -2073,12 +2397,22 @@ fn settings_playback(app: &mut App, ui: &mut Ui) {
         divider(ui);
         stereo_settings(app, ui);
         divider(ui);
-        setting_row(ui, tr!("settings-output-device"), Some(tr!("settings-output-device-desc")), |ui| {
-            output_device_picker(app, ui);
+        let desc = if cfg!(windows) { tr!("settings-output-device-desc") } else { tr!("settings-output-device-desc-system") };
+        setting_row(ui, tr!("settings-output-device"), Some(desc), |ui| {
+            play_on_picker(app, ui);
+        });
+        divider(ui);
+        let label = tr!("settings-local-network");
+        setting_row(ui, label, Some(tr!("settings-local-network-desc")), |ui| {
+            if toggle(ui, &mut app.local_network, label).changed() {
+                app.set_local_network();
+            }
         });
     });
-    settings_equalizer(app, ui);
-    settings_tempo(app, ui);
+}
+
+/// Settings › Music videos.
+fn settings_videos(app: &mut App, ui: &mut Ui) {
     settings_section(ui, tr!("settings-music-videos"), None, None, |ui| {
         setting_row(ui, tr!("settings-songs-not-videos"), Some(tr!("settings-songs-not-videos-desc")), |ui| {
             toggle(ui, &mut app.play_songs, tr!("settings-songs-not-videos"));
@@ -2141,7 +2475,7 @@ fn settings_downloads(app: &mut App, ui: &mut Ui) {
         divider(ui);
         setting_row(ui, tr!("settings-download-liked"), Some(tr!("settings-download-liked-desc")), |ui| {
             if toggle(ui, &mut app.download_liked, tr!("settings-download-liked")).changed() && app.download_liked {
-                app.download_all_liked();
+                app.download_all_kept(super::lists::LIKED_MUSIC);
             }
         });
         divider(ui);
@@ -2216,6 +2550,31 @@ fn settings_lyrics(app: &mut App, ui: &mut Ui) {
             if let Some(Some(code)) = language_picker(ui, &current, tr!("settings-translate-into"), Some(&app.lyric_prefs.target), None, |lang| lang.lyrics) {
                 app.lyric_prefs.target = code.to_owned();
             }
+        });
+        divider(ui);
+        // Another theme's lyrics (Spicy's, Apple Music's, …) under this theme's pages.
+        setting_row(ui, tr!("settings-lyrics-look"), Some(tr!("settings-lyrics-look-desc")), |ui| {
+            let theme_default = tr!("settings-theme-default");
+            let now = app.lyric_prefs.look.as_deref().map_or(theme_default, |id| crate::preset::get(id).name.as_str());
+            let btn = dropdown_button(ui, now, 210.0, tr!("settings-lyrics-look"));
+            widgets::menu_popup(&btn).show(|ui| {
+                widgets::menu_body(ui, 260.0);
+                dropdown_list(ui, 320.0, |ui| {
+                    let looks = std::iter::once(None).chain(crate::preset::all().iter().map(Some));
+                    for p in looks {
+                        let id = p.map(|p| p.id.clone());
+                        let checked = id == app.lyric_prefs.look;
+                        let row = option_row(ui, p.map_or(theme_default, |p| p.name.as_str()), checked);
+                        if checked && btn.clicked() {
+                            row.scroll_to_me(Some(egui::Align::Center));
+                        }
+                        if row.clicked() {
+                            app.lyric_prefs.look = id;
+                            ui.close();
+                        }
+                    }
+                });
+            });
         });
         divider(ui);
         setting_row(ui, tr!("settings-text-size"), Some(tr!("settings-text-size-desc")), |ui| {
@@ -2353,10 +2712,26 @@ fn percent_stepper(ui: &mut Ui, v: &mut f32, (min, max, step): (f32, f32, f32), 
     }
 }
 
-/// Settings › Appearance and Theme.
-fn settings_appearance(app: &mut App, ui: &mut Ui) {
+/// Animation speed: [`percent_stepper`]'s steps, and one more past the fastest, Off (#446).
+fn anim_speed_stepper(ui: &mut Ui, v: &mut f32) {
+    let (min, max, step) = theme::ANIM_SPEED_RANGE;
+    let snap = |x: f32| (x * 100.0).round() / 100.0;
+    if ui.add_enabled(*v < theme::ANIM_OFF, egui::Button::new("+").min_size(vec2(28.0, 26.0))).on_hover_text(tr!("settings-faster")).clicked() {
+        *v = if *v >= max - 0.001 { theme::ANIM_OFF } else { snap(*v + step).min(max) };
+    }
+    // After the click: + at 400% shows Off at once.
+    let off = *v >= theme::ANIM_OFF;
+    let shown = if off { tr!("ui-off").to_owned() } else { format!("{:.0}%", *v * 100.0) };
+    ui.label(egui::RichText::new(shown).font(theme::semibold(13.0)));
+    if ui.add_enabled(*v > min + 0.001, egui::Button::new("−").min_size(vec2(28.0, 26.0))).on_hover_text(tr!("settings-slower")).clicked() {
+        *v = if off { max } else { snap(*v - step).max(min) };
+    }
+}
+
+/// Settings › Themes: light or dark, the accent colour, and the themes to pick from.
+fn settings_themes(app: &mut App, ui: &mut Ui) {
     let was_theme = app.theme_id.clone();
-    settings_section(ui, tr!("settings-appearance"), None, None, |ui| {
+    settings_section(ui, tr!("settings-colours"), None, None, |ui| {
         let desc = if cfg!(windows) {
             tr!("settings-mode-desc-windows")
         } else {
@@ -2438,7 +2813,33 @@ fn settings_appearance(app: &mut App, ui: &mut Ui) {
         setting_row(ui, tr!("settings-accent-coloured-controls"), Some(tr!("settings-accent-coloured-controls-desc")), |ui| {
             toggle(ui, &mut app.accent_controls, tr!("settings-accent-coloured-controls"));
         });
-        divider(ui);
+    });
+
+    let current = crate::preset::get(&app.theme_id).name.clone();
+    // Not a card of rows, so it's narrowed here: to the themes that match.
+    let shown: Vec<&crate::preset::Preset> = FILTER.with_borrow_mut(|f| {
+        f.section = tr!("settings-themes").to_owned();
+        crate::preset::all().iter().filter(|p| f.words.is_empty() || words_match(&f.words, &f.section, &format!("{} {} {}", p.name, p.creators.join(" "), p.blurb))).collect()
+    });
+    if !shown.is_empty() {
+        FILTER.with_borrow_mut(|f| f.total += shown.len());
+        section_label(ui, tr!("settings-themes"), settings_value(Some(&current)).as_deref());
+        if !filtering() {
+            widgets::note(ui, tr!("settings-themes-note"), theme::regular(13.0), theme::text_dim());
+            ui.add_space(12.0);
+        }
+        themes(app, ui, &shown);
+    }
+    if was_theme != app.theme_id {
+        // The blur is baked into the art when it arrives: the same song needs it again.
+        app.art_key = None;
+        app.request_art();
+    }
+}
+
+/// Settings › Appearance: the background, the window and the type.
+fn settings_appearance(app: &mut App, ui: &mut Ui) {
+    settings_section(ui, tr!("settings-appearance"), None, None, |ui| {
         setting_row(ui, tr!("settings-always-show-seek-knob"), Some(tr!("settings-always-show-seek-knob-desc")), |ui| {
             toggle(ui, &mut app.seek_knob_always, tr!("settings-always-show-seek-knob"));
         });
@@ -2507,28 +2908,11 @@ fn settings_appearance(app: &mut App, ui: &mut Ui) {
         });
         divider(ui);
         settings_zoom(ui);
+        divider(ui);
+        setting_row(ui, tr!("settings-animation-speed"), Some(tr!("settings-animation-speed-desc")), |ui| {
+            anim_speed_stepper(ui, &mut app.anim_speed);
+        });
     });
-
-    let current = crate::preset::get(&app.theme_id).name.clone();
-    // Not a card of rows, so it's narrowed here: to the themes that match.
-    let shown: Vec<&crate::preset::Preset> = FILTER.with_borrow_mut(|f| {
-        f.section = tr!("settings-themes").to_owned();
-        crate::preset::all().iter().filter(|p| f.words.is_empty() || words_match(&f.words, &f.section, &format!("{} {} {}", p.name, p.creators.join(" "), p.blurb))).collect()
-    });
-    if !shown.is_empty() {
-        FILTER.with_borrow_mut(|f| f.total += shown.len());
-        section_label(ui, tr!("settings-themes"), settings_value(Some(&current)).as_deref());
-        if !filtering() {
-            widgets::note(ui, tr!("settings-themes-note"), theme::regular(13.0), theme::text_dim());
-            ui.add_space(12.0);
-        }
-        themes(app, ui, &shown);
-    }
-    if was_theme != app.theme_id {
-        // The blur is baked into the art when it arrives: the same song needs it again.
-        app.art_key = None;
-        app.request_art();
-    }
 }
 
 /// Settings › Appearance › Zoom: the size of everything, as Ctrl + plus / minus sets it.
@@ -2565,16 +2949,6 @@ fn settings_language(app: &mut App, ui: &mut Ui) {
                 app.language = pick.map(str::to_owned);
             }
         });
-        if i18n::resolve(app.language.as_deref()) != i18n::current() {
-            divider(ui);
-            let mut restart = false;
-            setting_row(ui, tr!("settings-restart-to-apply"), Some(tr!("settings-language-restart-desc")), |ui| {
-                restart = pill(ui, tr!("settings-restart-now"), None, true).clicked();
-            });
-            if restart {
-                app.restart(ui.ctx());
-            }
-        }
     });
 }
 
@@ -2693,6 +3067,13 @@ fn settings_window(app: &mut App, ui: &mut Ui) {
             ui.label(RichText::new(e).font(theme::regular(12.5)).color(theme::RED));
             ui.add_space(8.0);
         }
+        // Linux tray icons can't tell a click from a menu request.
+        if app.close_to_tray && !cfg!(target_os = "linux") {
+            divider(ui);
+            setting_row(ui, tr!("settings-tray-click-plays"), Some(tr!("settings-tray-click-plays-desc")), |ui| {
+                toggle(ui, &mut app.tray_click_plays, tr!("settings-tray-click-plays"));
+            });
+        }
         if crate::notify::SUPPORTED {
             divider(ui);
             let ok = crate::notify::available();
@@ -2707,19 +3088,20 @@ fn settings_window(app: &mut App, ui: &mut Ui) {
                 });
             });
         }
-        // A Wayland window can only be minimized, and can't bring itself back: from the
-        // next start the app opens an X11 window instead while this is on.
-        if app.close_to_tray && crate::wayland_window() {
-            divider(ui);
-            let mut restart = false;
-            setting_row(ui, tr!("settings-restart-to-apply"), Some(tr!("settings-close-to-tray-restart-desc")), |ui| {
-                restart = pill(ui, tr!("settings-restart-now"), None, true).clicked();
-            });
-            if restart {
-                app.restart(ui.ctx());
-            }
-        }
         divider(ui);
+        setting_row(ui, tr!("settings-collapse-sidebar"), Some(tr!("settings-collapse-sidebar-desc")), |ui| {
+            // What shows: a theme that starts as a rail turns the setting around.
+            let mut collapsed = super::shell::is_rail(app);
+            if toggle(ui, &mut collapsed, tr!("settings-collapse-sidebar")).changed() {
+                app.sidebar_collapsed = !app.sidebar_collapsed;
+            }
+        });
+    });
+}
+
+/// Settings › Advanced: how the window's drawn, which takes a restart.
+fn settings_advanced(app: &mut App, ui: &mut Ui) {
+    settings_section(ui, tr!("settings-advanced"), None, None, |ui| {
         if cfg!(target_os = "linux") {
             use super::titlebar::Choice;
             let dir = app.backend.data_dir().to_owned();
@@ -2739,25 +3121,7 @@ fn settings_window(app: &mut App, ui: &mut Ui) {
                 });
             });
             divider(ui);
-            if saved.own_here() != super::titlebar::custom() && std::env::var_os("YTM_NATIVE_TITLEBAR").is_none() {
-                let mut restart = false;
-                setting_row(ui, tr!("settings-restart-to-apply"), Some(tr!("settings-title-bar-restart-desc")), |ui| {
-                    restart = pill(ui, tr!("settings-restart-now"), None, true).clicked();
-                });
-                if restart {
-                    app.restart(ui.ctx());
-                }
-                divider(ui);
-            }
         }
-        setting_row(ui, tr!("settings-collapse-sidebar"), Some(tr!("settings-collapse-sidebar-desc")), |ui| {
-            // What shows: a theme that starts as a rail turns the setting around.
-            let mut collapsed = super::shell::is_rail(app);
-            if toggle(ui, &mut collapsed, tr!("settings-collapse-sidebar")).changed() {
-                app.sidebar_collapsed = !app.sidebar_collapsed;
-            }
-        });
-        divider(ui);
         let api = crate::renderer::api_name();
         let title = tr!("settings-draw-with", api = api);
         let desc = tr!("extra-renderer-desc", api = api);
@@ -2770,20 +3134,10 @@ fn settings_window(app: &mut App, ui: &mut Ui) {
                 }
             }
         });
-        if app.wgpu_renderer != (crate::renderer::active() == crate::renderer::Renderer::Wgpu) {
-            divider(ui);
-            let mut restart = false;
-            setting_row(ui, tr!("settings-restart-to-apply"), Some(tr!("settings-renderer-restart-desc")), |ui| {
-                restart = pill(ui, tr!("settings-restart-now"), None, true).clicked();
-            });
-            if restart {
-                app.restart(ui.ctx());
-            }
-        }
     });
 }
 
-/// Settings › Appearance › Window material: Windows 11's Mica, Mica Alt or Acrylic.
+/// Settings › Mini player.
 fn settings_mini(app: &mut App, ui: &mut Ui) {
     use super::mini;
     let dir = app.backend.data_dir().to_owned();
@@ -2803,6 +3157,29 @@ fn settings_mini(app: &mut App, ui: &mut Ui) {
                     log::warn!("mini player: couldn't save the style: {e}");
                 }
             });
+            divider(ui);
+            setting_row(ui, tr!("settings-mini-autohide"), Some(tr!("settings-mini-autohide-desc")), |ui| {
+                toggle(ui, &mut app.mini.lyrics_autohide, tr!("settings-mini-autohide"));
+            });
+            divider(ui);
+            setting_row(ui, tr!("settings-mini-pill-extended"), Some(tr!("settings-mini-pill-extended-desc")), |ui| {
+                toggle(ui, &mut app.mini.pill_extended, tr!("settings-mini-pill-extended"));
+            });
+            divider(ui);
+            setting_row(ui, tr!("settings-mini-cover-bg"), Some(tr!("settings-mini-cover-bg-desc")), |ui| {
+                toggle(ui, &mut app.mini.cover_bg, tr!("settings-mini-cover-bg"));
+            });
+            if app.mini.cover_bg {
+                divider(ui);
+                setting_row_wide(ui, tr!("settings-mini-cover-blur"), None, SLIDER_W, |ui| {
+                    step_slider(ui, &mut app.mini.cover_blur, (0.0, 10.0, 1.0), Some(0.0), |v| format!("{}", v.round() as u32), tr!("settings-mini-cover-blur"));
+                });
+                divider(ui);
+                setting_row_wide(ui, tr!("settings-mini-cover-opacity"), None, SLIDER_W, |ui| {
+                    // Fills from the left like a level; a double-click still goes to 100%.
+                    step_slider_home(ui, &mut app.mini.cover_opacity, (0.0, 100.0, 1.0), Some(0.0), Some(100.0), |v| format!("{}%", v.round() as u32), tr!("settings-mini-cover-opacity"));
+                });
+            }
         });
         divider(ui);
         setting_row(ui, tr!("settings-keep-on-top"), Some(tr!("settings-keep-on-top-desc")), |ui| {
@@ -2817,31 +3194,11 @@ fn settings_mini(app: &mut App, ui: &mut Ui) {
             setting_row(ui, tr!("settings-keep-on-top-wayland"), Some(tr!("settings-keep-on-top-wayland-desc")), |ui| {
                 toggle(ui, &mut app.mini_x11, tr!("settings-keep-on-top-wayland"));
             });
-            // The window type follows from the next start (Close to tray's row covers it on).
-            if app.mini_x11 == crate::wayland_window() && !app.close_to_tray {
-                divider(ui);
-                let mut restart = false;
-                setting_row(ui, tr!("settings-restart-to-apply"), Some(tr!("settings-keep-on-top-wayland-restart-desc")), |ui| {
-                    restart = pill(ui, tr!("settings-restart-now"), None, true).clicked();
-                });
-                if restart {
-                    app.restart(ui.ctx());
-                }
-            }
-        }
-        if opengl && mini::pill_saved(&dir) != mini::pill_active() {
-            divider(ui);
-            let mut restart = false;
-            setting_row(ui, tr!("settings-restart-to-apply"), Some(tr!("settings-pill-mini-player-restart-desc")), |ui| {
-                restart = pill(ui, tr!("settings-restart-now"), None, true).clicked();
-            });
-            if restart {
-                app.restart(ui.ctx());
-            }
         }
     });
 }
 
+/// Settings › Appearance › Window material: Windows 11's Mica, Mica Alt or Acrylic.
 fn settings_backdrop(app: &mut App, ui: &mut Ui) {
     use crate::backdrop::{self, Backdrop};
     let saved = backdrop::load(app.backend.data_dir());
@@ -2867,16 +3224,6 @@ fn settings_backdrop(app: &mut App, ui: &mut Ui) {
     {
         log::warn!("backdrop: couldn't save the setting: {e}");
     }
-    if opengl && backdrop::load(app.backend.data_dir()) != backdrop::active() {
-        divider(ui);
-        let mut restart = false;
-        setting_row(ui, tr!("settings-restart-to-apply"), Some(tr!("settings-window-material-restart-desc")), |ui| {
-            restart = pill(ui, tr!("settings-restart-now"), None, true).clicked();
-        });
-        if restart {
-            app.restart(ui.ctx());
-        }
-    }
 }
 
 /// Settings › App icon.
@@ -2887,7 +3234,7 @@ fn settings_app_icon(app: &mut App, ui: &mut Ui) {
     } else {
         (tr!("settings-app-icon-note"), " A pinned taskbar icon can take a moment to catch up.")
     };
-    settings_section(ui, tr!("settings-app-icon"), Some(crate::appicon::get(app.app_icon).name), Some(&format!("{what}.{more}")), |ui| {
+    settings_section(ui, tr!("settings-app-icon"), Some(crate::appicon::get(app.app_icon).name()), Some(&format!("{what}.{more}")), |ui| {
         if filter_show(ui, what) {
             ui.add_space(14.0);
             app_icons(app, ui);
@@ -3091,6 +3438,7 @@ fn settings_shortcuts(ui: &mut Ui) {
             (tr!("settings-play-pause"), &[tr!("settings-space")]),
             (tr!("settings-next-previous-song"), &[tr!("settings-ctrl"), "→ / ←"]),
             (tr!("settings-volume-up-down"), &[tr!("settings-ctrl"), "↑ / ↓"]),
+            (tr!("settings-shortcut-seek"), &["← / →"]),
             (tr!("settings-shortcut-command-palette"), &[tr!("settings-ctrl"), "K"]),
             (tr!("settings-search"), &[tr!("settings-ctrl"), "F"]),
             (tr!("settings-shortcut-find-in-list"), &[tr!("settings-ctrl"), tr!("settings-shift"), "F"]),
@@ -3174,7 +3522,7 @@ fn network(app: &mut App, ui: &mut Ui) {
         if remaining > 0.0 {
             let elapsed = (HIGHLIGHT_SECS - remaining) as f32;
             let pulse = 0.5 + 0.5 * (elapsed * std::f32::consts::TAU).cos();
-            let fade = (remaining / 0.25).min(1.0) as f32;
+            let fade = (remaining / theme::secs(0.25)).min(1.0) as f32;
             let color = theme::with_alpha(app.accent_color(), (0.2 + 0.8 * pulse) * fade);
             let stroke = egui::Stroke::new(2.0, color);
             ui.painter().rect_stroke(response.rect.expand(4.0), response.rect.height() / 2.0 + 4.0, stroke, egui::StrokeKind::Outside);
@@ -3182,13 +3530,6 @@ fn network(app: &mut App, ui: &mut Ui) {
         }
         if response.changed() {
             app.backend.set_backup_stream(app.backup_stream);
-        }
-    });
-    divider(ui);
-    let label = tr!("settings-local-network");
-    setting_row(ui, label, Some(tr!("settings-local-network-desc")), |ui| {
-        if toggle(ui, &mut app.local_network, label).changed() {
-            app.set_local_network();
         }
     });
     divider(ui);
@@ -3252,7 +3593,8 @@ fn network(app: &mut App, ui: &mut Ui) {
             ui.horizontal(|ui| {
                 save = pill(ui, if saved { tr!("settings-saved") } else { tr!("settings-save") }, None, !saved).clicked() && !saved;
                 ui.add_space(8.0);
-                widgets::note(ui, tr!("settings-proxy-password-note"), theme::regular(12.5), theme::text_dim());
+                let note = if cfg!(windows) { tr!("settings-proxy-password-note") } else { tr!("settings-proxy-password-note-system") };
+                widgets::note(ui, note, theme::regular(12.5), theme::text_dim());
             });
             if save {
                 match proxy::save(app.backend.data_dir(), &custom) {
@@ -3298,16 +3640,6 @@ fn network(app: &mut App, ui: &mut Ui) {
             });
         }
     });
-    if app.proxy_saved != *proxy::active() {
-        divider(ui);
-        let mut restart = false;
-        setting_row(ui, tr!("settings-restart-to-apply"), Some(tr!("settings-proxy-restart-desc")), |ui| {
-            restart = pill(ui, tr!("settings-restart-now"), None, true).clicked();
-        });
-        if restart {
-            app.restart(ui.ctx());
-        }
-    }
 }
 
 /// The icon picker: a tile per icon in even rows, five across (two when that's too tight).
@@ -3334,7 +3666,7 @@ fn app_icons(app: &mut App, ui: &mut Ui) {
 
 fn app_icon_tile(ui: &mut Ui, v: &crate::appicon::Variant, w: f32, selected: bool, accent: Color32) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(vec2(w, 112.0), Sense::click());
-    let resp = named(resp, &tr!("settings-app-icon-named", name = v.name)).on_hover_cursor(egui::CursorIcon::PointingHand);
+    let resp = named(resp, &tr!("settings-app-icon-named", name = v.name())).on_hover_cursor(egui::CursorIcon::PointingHand);
     if !ui.is_rect_visible(rect) {
         return resp;
     }
@@ -3347,8 +3679,8 @@ fn app_icon_tile(ui: &mut Ui, v: &crate::appicon::Variant, w: f32, selected: boo
     icon_at(ui, v, Rect::from_center_size(pos2(rect.center().x, rect.top() + 46.0), Vec2::splat(56.0)));
     // Narrow tiles get a smaller label so "YouTube Music" still fits.
     let font = theme::semibold(if w >= 108.0 { 13.0 } else { 12.0 });
-    let label = widgets::galley(ui, v.name, font.clone(), theme::text(), w - 8.0);
-    widgets::text_at(ui, pos2(rect.center().x - label.size().x / 2.0, rect.top() + 84.0), v.name, font, theme::text(), w - 8.0);
+    let label = widgets::galley(ui, v.name(), font.clone(), theme::text(), w - 8.0);
+    widgets::text_at(ui, pos2(rect.center().x - label.size().x / 2.0, rect.top() + 84.0), v.name(), font, theme::text(), w - 8.0);
     resp
 }
 
@@ -3430,79 +3762,207 @@ fn font_picker(ui: &mut Ui) -> Option<String> {
     picked.filter(|p| *p != current)
 }
 
+/// The output device that follows the system's choice. On Linux that's ALSA's default,
+/// which plays through PipeWire or PulseAudio where they run.
 fn system_default() -> &'static str {
-    tr!("settings-windows-default")
+    if cfg!(windows) { tr!("settings-windows-default") } else { tr!("settings-system-default") }
 }
 
-/// A device's name in the list, AirPlay speakers marked as such.
-fn device_label(id: &str, name: &str) -> String {
-    if id.starts_with(crate::airplay::PREFIX) { tr!("settings-airplay-device", name = name) } else { name.to_owned() }
-}
-
-fn output_device_picker(app: &mut App, ui: &mut Ui) {
-    // Found on the network in the background, so read afresh each frame.
-    let speakers = crate::airplay::speakers();
-    let current = match &app.output_device {
-        None => system_default().to_owned(),
-        Some((id, name)) => match app.output_devices.iter().map(|d| (&d.id, &d.name)).chain(speakers.iter().map(|s| (&s.id, &s.name))).find(|(d, _)| *d == id) {
-            Some((_, n)) => device_label(id, n),
-            None if app.output_devices.is_empty() => device_label(id, name),
-            None => tr!("settings-not-connected", name = device_label(id, name)),
+/// Where the music plays, by name: the sound card's or the speakers', saying so if
+/// they're not there. Speakers are found in the background, so this is read afresh.
+pub(super) fn destination_label(app: &App) -> String {
+    use crate::destination::{self, Destination};
+    let missing = || if app.destination_name.is_empty() { tr!("settings-not-connected", name = "?") } else { tr!("settings-not-connected", name = app.destination_name.as_str()) };
+    match &app.destination {
+        Destination::Local(None) => system_default().to_owned(),
+        Destination::Local(Some(id)) => match app.output_devices.iter().find(|d| &d.id == id) {
+            Some(d) => d.name.clone(),
+            None if app.output_devices.is_empty() => app.destination_name.clone(),
+            None => missing(),
         },
-    };
-    let btn = dropdown_button(ui, &current, 210.0, tr!("settings-output-device"));
-    output_device_menu(app, &btn, widgets::menu_popup(&btn), 340.0, &speakers);
+        Destination::Remote { members, .. } => match destination::find_all(members) {
+            Some(found) => found.iter().map(|r| r.name.as_str()).collect::<Vec<_>>().join(", "),
+            None => missing(),
+        },
+    }
 }
 
-/// The output devices to pick from, in `popup` (opened by `btn`): sound cards, then AirPlay
-/// speakers with its mark. For Settings › Output device and the player bar's button.
-pub(super) fn output_device_menu(app: &mut App, btn: &egui::Response, popup: egui::Popup, width: f32, speakers: &[crate::airplay::Speaker]) {
+fn play_on_picker(app: &mut App, ui: &mut Ui) {
+    let btn = dropdown_button(ui, &destination_label(app), 210.0, tr!("settings-output-device"));
+    let popup = widgets::menu_popup(&btn);
+    play_on_menu(app, btn.clicked(), popup, 340.0);
+}
+
+/// "Play on", in `popup` (`opened` this frame): this computer's sound cards, then speakers
+/// on the network. For Settings › Playback and the player bar's button.
+pub(super) fn play_on_menu(app: &mut App, opened: bool, popup: egui::Popup, width: f32) {
+    use crate::destination::{self, Destination};
     // Listed when opened, so a device that just connected shows up. Only then: the player
     // bar draws this every frame, and listing asks the system each time.
-    if btn.clicked() {
-        app.output_devices = crate::audio::output_devices();
+    // When speakers began to be looked for, to say so for a while: they answer in seconds.
+    let since = egui::Id::unique("play-on-looking");
+    if opened {
+        let card = match &app.destination {
+            Destination::Local(id) => id.as_deref(),
+            Destination::Remote { .. } => None,
+        };
+        app.output_devices = crate::audio::output_devices(card);
+        destination::discover();
+        // The time first: reading it inside `data_mut` would wait on the lock it holds.
+        let now = popup.ctx().input(|i| i.time);
+        popup.ctx().data_mut(|d| d.insert_temp(since, now));
     }
-    if btn.clicked() {
-        crate::airplay::discover();
-    }
-    let mut pick: Option<Option<(String, String)>> = None;
-    popup.show(|ui| {
-        // Speakers turn up as they answer.
-        ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
+    let mut pick: Option<(Destination, String)> = None;
+    // It stays open on a pick, to watch the speaker connect or pick again.
+    popup.close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
+        // Speakers turn up as they answer, and connect a while after they're picked.
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
         widgets::menu_body(ui, width);
-        dropdown_list(ui, 320.0, |ui| {
-            if option_row(ui, system_default(), app.output_device.is_none()).clicked() {
-                pick = Some(None);
+        // As tall as what's in it: it scrolls only past what the window has room for.
+        let room = ui.ctx().content_rect().height() - 140.0;
+        dropdown_list(ui, room.max(200.0), |ui| {
+            super::nowplaying::menu_caption(ui, tr!("settings-this-computer"));
+            let speaker = Some(theme::icon::MONITOR_SPEAKER);
+            // A sound card plays at once: nothing to watch, so the menu closes as it did.
+            if option_row_marked(ui, system_default(), speaker, app.destination == Destination::Local(None)).clicked() {
+                pick = Some((Destination::Local(None), String::new()));
                 ui.close();
             }
-            let cards = app.output_devices.iter().map(|d| (&d.id, &d.name, None));
-            let devices = cards.chain(speakers.iter().map(|s| (&s.id, &s.name, Some(theme::icon::AIRPLAY))));
-            for (id, name, mark) in devices {
-                if option_row_marked(ui, name, mark, app.output_device.as_ref().is_some_and(|(cur, _)| cur == id)).clicked() {
-                    pick = Some(Some((id.clone(), name.clone())));
+            for d in &app.output_devices {
+                if option_row_marked(ui, &d.name, speaker, app.destination == Destination::Local(Some(d.id.clone()))).clicked() {
+                    pick = Some((Destination::Local(Some(d.id.clone())), d.name.clone()));
                     ui.close();
                 }
             }
-            // AirPlay speakers need the network looked over, which Windows' firewall asks
-            // about: only once it's asked for. The menu stays open for them to turn up.
+            widgets::menu_divider(ui);
+            super::nowplaying::menu_caption(ui, tr!("settings-on-your-network"));
+            // Speakers need the network looked over, which Windows' firewall asks about:
+            // only once it's asked for. The menu stays open for them to turn up.
             if !app.local_network {
-                widgets::menu_divider(ui);
-                if option_row_marked(ui, tr!("settings-local-network"), Some(theme::icon::AIRPLAY), false).clicked() {
+                if hint_row(ui, theme::icon::AIRPLAY, tr!("settings-local-network"), tr!("settings-local-network-hint")).clicked() {
                     app.local_network = true;
                     app.set_local_network();
+                    let now = ui.input(|i| i.time);
+                    ui.data_mut(|d| d.insert_temp(since, now));
                 }
-            } else if speakers.is_empty() {
-                widgets::menu_divider(ui);
+                return;
+            }
+            let found = destination::receivers();
+            let state = app.audio.remote_state();
+            for r in &found {
+                if speaker_row(ui, r, app.destination.has(&r.id), &state).clicked() {
+                    pick = Some((Destination::speaker(r), r.name.clone()));
+                }
+            }
+            // Looking, for `LOOKING` after it's opened; then nothing, or that there's none.
+            const LOOKING: f64 = 8.0;
+            let now = ui.input(|i| i.time);
+            let looking = ui.data(|d| d.get_temp::<f64>(since)).is_some_and(|t| now - t < LOOKING);
+            let note = match (looking, found.is_empty()) {
+                (true, true) => Some(tr!("settings-airplay-searching")),
+                (true, false) => Some(tr!("settings-speakers-searching-more")),
+                (false, true) => Some(tr!("settings-speakers-none")),
+                (false, false) => None,
+            };
+            if let Some(note) = note {
                 let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::hover());
-                widgets::icon_at(ui, pos2(r.left() + 20.0, r.center().y), theme::icon::AIRPLAY, 15.0, theme::text_faint());
-                widgets::text_at(ui, pos2(r.left() + 38.0, r.center().y - 8.0), tr!("settings-airplay-searching"), theme::regular(13.0), theme::text_faint(), r.width() - 50.0);
+                if looking {
+                    spinner(ui, pos2(r.left() + 20.0, r.center().y), 5.0, theme::text_faint());
+                }
+                widgets::text_at(ui, pos2(r.left() + 38.0, r.center().y - 8.0), note, theme::regular(13.0), theme::text_faint(), r.width() - 50.0);
             }
         });
     });
-    if let Some(pick) = pick {
-        app.audio.send(crate::audio::AudioCmd::SetDevice(pick.as_ref().map(|(id, _)| id.clone())));
-        app.output_device = pick;
+    if let Some((to, name)) = pick {
+        app.audio.send(crate::audio::AudioCmd::SetDestination(to.clone()));
+        app.destination = to;
+        app.destination_name = name;
     }
+}
+
+/// A small circle going round, for something on its way.
+fn spinner(ui: &Ui, center: egui::Pos2, radius: f32, color: egui::Color32) {
+    let a = ui.input(|i| i.time) as f32 * 6.0;
+    let points = (0..16).map(|i| {
+        let t = a + i as f32 * 0.28;
+        center + vec2(t.cos(), t.sin()) * radius
+    });
+    ui.painter().add(egui::Shape::line(points.collect(), egui::Stroke::new(1.5, color)));
+    ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
+}
+
+/// A speaker on the network in "Play on": its kind's icon, its name and kind, and on the
+/// one picked a check, a spinner while it connects, or why it isn't playing under it.
+fn speaker_row(ui: &mut Ui, r: &crate::destination::Receiver, selected: bool, state: &crate::audio::RemoteState) -> egui::Response {
+    use crate::audio::RemoteState;
+    let why = match state {
+        RemoteState::Failed(why) if selected => Some(why.as_str()),
+        _ => None,
+    };
+    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), if why.is_some() { 52.0 } else { 34.0 }), Sense::click());
+    let resp = widgets::named(resp, &r.name).on_hover_cursor(egui::CursorIcon::PointingHand);
+    let h = theme::anim_bool(ui.ctx(), resp.id.with("h"), resp.hovered(), 0.12);
+    if h > 0.0 || selected {
+        ui.painter().rect_filled(rect, theme::menu_item_radius(), theme::glass(0.05 * selected as u8 as f32 + 0.08 * h));
+    }
+    let kind = r.best();
+    let y = rect.top() + 17.0;
+    let x = rect.left() + 38.0;
+    widgets::icon_at(ui, pos2(rect.left() + 20.0, y), kind.icon(), 15.0, theme::text_dim());
+    let label = ui.painter().layout_no_wrap(kind.label().to_owned(), theme::regular(12.0), theme::text_faint());
+    // At the edge, leaving room for the check only on the row that has it.
+    let label_x = rect.right() - if selected { 36.0 } else { 12.0 } - label.size().x;
+    ui.painter().galley(pos2(label_x, y - label.size().y / 2.0), label, theme::text_faint());
+    let font = if selected { theme::semibold(14.0) } else { theme::regular(14.0) };
+    widgets::text_at_elided(ui, pos2(x, y - 9.0), &r.name, font, theme::text(), label_x - 10.0 - x);
+    if selected {
+        let mark = pos2(rect.right() - 16.0, y);
+        if *state == RemoteState::Connecting {
+            spinner(ui, mark, 6.0, theme::text());
+        } else {
+            widgets::icon_at(ui, mark, theme::icon::CHECK, 15.0, theme::text());
+        }
+    }
+    if let Some(why) = why {
+        widgets::text_at_elided(ui, pos2(x, y + 10.0), why, theme::regular(12.0), theme::text_dim(), rect.right() - 16.0 - x);
+    }
+    resp
+}
+
+/// An option with an icon, and a line under it saying what it does.
+fn hint_row(ui: &mut Ui, mark: char, label: &str, hint: &str) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 48.0), Sense::click());
+    let resp = widgets::named(resp, label).on_hover_cursor(egui::CursorIcon::PointingHand);
+    let h = theme::anim_bool(ui.ctx(), resp.id.with("h"), resp.hovered(), 0.12);
+    if h > 0.0 {
+        ui.painter().rect_filled(rect, theme::menu_item_radius(), theme::glass(0.08 * h));
+    }
+    let x = rect.left() + 38.0;
+    widgets::icon_at(ui, pos2(rect.left() + 20.0, rect.top() + 17.0), mark, 15.0, theme::text_dim());
+    widgets::text_at(ui, pos2(x, rect.top() + 8.0), label, theme::regular(14.0), theme::text(), rect.right() - 12.0 - x);
+    widgets::text_at(ui, pos2(x, rect.top() + 27.0), hint, theme::regular(12.0), theme::text_faint(), rect.right() - 12.0 - x);
+    resp
+}
+
+/// An equalizer preset's name (`eq::PRESETS`'), in the app's language.
+fn eq_preset_label(name: &'static str) -> &'static str {
+    eq_preset_message(name).unwrap_or(name)
+}
+
+fn eq_preset_message(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "Flat" => tr!("settings-eq-flat"),
+        "Bass boost" => tr!("settings-eq-bass-boost"),
+        "Treble boost" => tr!("settings-eq-treble-boost"),
+        "Vocal" => tr!("settings-eq-vocal"),
+        "Rock" => tr!("settings-eq-rock"),
+        "Pop" => tr!("settings-eq-pop"),
+        "Electronic" => tr!("settings-eq-electronic"),
+        "Acoustic" => tr!("settings-eq-acoustic"),
+        "Classical" => tr!("settings-eq-classical"),
+        "Late night" => tr!("settings-eq-late-night"),
+        _ => return None,
+    })
 }
 
 /// Settings › Playback › Equalizer.
@@ -3517,13 +3977,13 @@ fn settings_equalizer(app: &mut App, ui: &mut Ui) {
         ui.add_enabled_ui(app.eq_on, |ui| {
             divider(ui);
             setting_row(ui, tr!("settings-preset"), None, |ui| {
-                let btn = dropdown_button(ui, eq::preset_name(&app.eq_gains).unwrap_or(tr!("settings-custom")), 180.0, tr!("settings-equalizer-preset"));
+                let btn = dropdown_button(ui, eq::preset_name(&app.eq_gains).map_or(tr!("settings-custom"), eq_preset_label), 180.0, tr!("settings-equalizer-preset"));
                 let mut pick = None;
                 widgets::menu_popup(&btn).show(|ui| {
                     widgets::menu_body(ui, 200.0);
                     dropdown_list(ui, 380.0, |ui| {
                         for (name, gains) in &eq::PRESETS {
-                            if option_row(ui, name, app.eq_gains == *gains).clicked() {
+                            if option_row(ui, eq_preset_label(name), app.eq_gains == *gains).clicked() {
                                 pick = Some(*gains);
                                 ui.close();
                             }
@@ -3567,6 +4027,13 @@ fn settings_tempo(app: &mut App, ui: &mut Ui) {
             setting_row(ui, tr!("settings-keep-pitch"), Some(tr!("settings-keep-pitch-desc")), |ui| {
                 toggle(ui, &mut app.keep_pitch, tr!("settings-keep-pitch"));
             });
+            divider(ui);
+            setting_row_wide(ui, tr!("settings-transpose"), Some(tr!("settings-transpose-desc")), SLIDER_W, |ui| {
+                let mut v = app.transpose as f32;
+                let max = crate::audio::tempo::MAX_SEMITONES as f32;
+                step_slider(ui, &mut v, (-max, max, 1.0), Some(0.0), |v| semitones(v.round() as i32), tr!("settings-transpose"));
+                app.transpose = v.round() as i32;
+            });
         });
     });
 }
@@ -3578,6 +4045,15 @@ pub(super) fn tempo_in_jam() -> &'static str {
 /// A speed as it's shown: 1×, 1.5×, 1.25×.
 pub(super) fn times(v: f32) -> String {
     format!("{}×", (v * 100.0).round() / 100.0)
+}
+
+/// A transpose as it's shown: 0, +2, −3.
+pub(super) fn semitones(n: i32) -> String {
+    match n {
+        0 => "0".to_owned(),
+        n if n > 0 => format!("+{n}"),
+        n => format!("\u{2212}{}", -n),
+    }
 }
 
 /// The equalizer's bands as vertical sliders, over the curve they make together.
@@ -3666,7 +4142,7 @@ fn normalization_desc(app: &App) -> String {
         Normalize::Quiet => tr!("settings-normalization-quiet-desc"),
     };
     match (app.current().is_some(), super::shell::normalization_note(app)) {
-        (true, Some(note)) => format!("{what} This song: {note}."),
+        (true, Some(note)) => format!("{what} {note}"),
         _ => what.to_owned(),
     }
 }
@@ -3747,7 +4223,7 @@ pub(super) fn option_row(ui: &mut Ui, label: &str, selected: bool) -> egui::Resp
     option_row_marked(ui, label, None, selected)
 }
 
-/// An option with an icon before it (an AirPlay speaker's).
+/// An option with an icon before it.
 fn option_row_marked(ui: &mut Ui, label: &str, mark: Option<char>, selected: bool) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 34.0), Sense::click());
     let resp = widgets::named(resp, label).on_hover_cursor(egui::CursorIcon::PointingHand);
@@ -3820,7 +4296,12 @@ pub(super) fn settings_card(ui: &mut Ui, body: impl FnOnce(&mut Ui)) {
 /// it shows only the rows that match, and nothing at all if none do.
 pub(super) fn settings_section(ui: &mut Ui, title: &str, value: Option<&str>, note: Option<&str>, body: impl FnOnce(&mut Ui)) {
     if !filtering() {
-        section_label(ui, title, value);
+        // The page's own name, above its first card, is already in the header.
+        if FILTER.with_borrow(|f| f.tab == title) {
+            ui.add_space(24.0);
+        } else {
+            section_label(ui, title, value);
+        }
         if let Some(n) = note {
             widgets::note(ui, n, theme::regular(13.0), theme::text_dim());
             ui.add_space(12.0);
@@ -3878,12 +4359,10 @@ pub(super) fn setting_row_wide(ui: &mut Ui, title: &str, desc: Option<&str>, con
     // In a right-to-left language, the text starts at the right of its column.
     let x = |g: &egui::Galley| if base.is_some() { rect.left() + text_w - g.size().x } else { rect.left() };
     let title_pos = pos2(x(&title_g), top);
-    ui.painter().galley(title_pos, title_g.clone(), theme::with_alpha(theme::text(), fade));
-    widgets::tip_if_elided(ui, Rect::from_min_size(title_pos, title_g.size()), &title_g, title);
+    widgets::galley_tipped(ui, title_pos, title_g.clone(), theme::with_alpha(theme::text(), fade), title);
     if let (Some(d), Some(g)) = (desc, desc_g) {
         let desc_pos = pos2(x(&g), top + title_g.size().y + 3.0);
-        ui.painter().galley(desc_pos, g.clone(), theme::with_alpha(theme::text_dim(), fade));
-        widgets::tip_if_elided(ui, Rect::from_min_size(desc_pos, g.size()), &g, d);
+        widgets::galley_tipped(ui, desc_pos, g, theme::with_alpha(theme::text_dim(), fade), d);
     }
     let ctl = Rect::from_min_max(pos2(rect.left() + text_w + 20.0, rect.top()), rect.max);
     let mut cui = ui.new_child(egui::UiBuilder::new().max_rect(ctl).layout(egui::Layout::right_to_left(egui::Align::Center)));
@@ -3958,7 +4437,12 @@ fn seconds_slider(ui: &mut Ui, v: &mut u32, range: std::ops::RangeInclusive<u32>
 
 /// A slider over `lo..=hi` in steps of `step`, for a settings row: the value, then the
 /// track between its ends. It fills from `from` (`lo` when none) to the knob.
-fn step_slider(ui: &mut Ui, v: &mut f32, (lo, hi, step): (f32, f32, f32), from: Option<f32>, text: impl Fn(f32) -> String, name: &str) -> egui::Response {
+fn step_slider(ui: &mut Ui, v: &mut f32, range: (f32, f32, f32), from: Option<f32>, text: impl Fn(f32) -> String, name: &str) -> egui::Response {
+    step_slider_home(ui, v, range, from, from, text, name)
+}
+
+/// [`step_slider`] with the fill's start and the double-click's home apart.
+fn step_slider_home(ui: &mut Ui, v: &mut f32, (lo, hi, step): (f32, f32, f32), fill_from: Option<f32>, home: Option<f32>, text: impl Fn(f32) -> String, name: &str) -> egui::Response {
     let label = |ui: &mut Ui, g: std::sync::Arc<egui::Galley>, w: Option<f32>, color: Color32| {
         let (rect, _) = ui.allocate_exact_size(vec2(w.unwrap_or(g.size().x), 26.0), Sense::hover());
         ui.painter().galley(pos2(rect.right() - g.size().x, rect.center().y - g.size().y / 2.0), g, color);
@@ -3970,7 +4454,7 @@ fn step_slider(ui: &mut Ui, v: &mut f32, (lo, hi, step): (f32, f32, f32), from: 
     label(ui, hi_g, None, theme::text_dim());
     // Shorter where the row hasn't the room (a narrow window), not over its description.
     let width = (ui.available_width() - lo_g.size().x - 2.0 * ui.spacing().item_spacing.x).clamp(60.0, 170.0);
-    let resp = slider_track(ui, v, (lo, hi, step), from, width, name);
+    let resp = slider_track_home(ui, v, (lo, hi, step), fill_from, home, width, name);
     label(ui, lo_g, None, theme::text_dim());
     resp
 }
@@ -3979,12 +4463,17 @@ fn step_slider(ui: &mut Ui, v: &mut f32, (lo, hi, step): (f32, f32, f32), from: 
 const SLIDER_W: f32 = 310.0;
 
 /// Just the track and knob of a step slider, `width` wide.
-pub(super) fn slider_track(ui: &mut Ui, v: &mut f32, (lo, hi, step): (f32, f32, f32), from: Option<f32>, width: f32, name: &str) -> egui::Response {
+pub(super) fn slider_track(ui: &mut Ui, v: &mut f32, range: (f32, f32, f32), from: Option<f32>, width: f32, name: &str) -> egui::Response {
+    slider_track_home(ui, v, range, from, from, width, name)
+}
+
+/// [`slider_track`] with the fill's start and the double-click's home apart.
+pub(super) fn slider_track_home(ui: &mut Ui, v: &mut f32, (lo, hi, step): (f32, f32, f32), fill_from: Option<f32>, home: Option<f32>, width: f32, name: &str) -> egui::Response {
     let (rect, mut resp) = ui.allocate_exact_size(vec2(width, 26.0), Sense::click_and_drag());
     let track = Rect::from_center_size(rect.center(), vec2(rect.width() - 16.0, 4.0));
     let old = *v;
     // Back home on a double-click, as the equalizer's bands go back to 0.
-    if let Some(home) = from.filter(|_| resp.double_clicked()) {
+    if let Some(home) = home.filter(|_| resp.double_clicked()) {
         *v = home;
     } else if let Some(p) = resp.interact_pointer_pos()
         && (resp.dragged() || resp.clicked())
@@ -4002,7 +4491,7 @@ pub(super) fn slider_track(ui: &mut Ui, v: &mut f32, (lo, hi, step): (f32, f32, 
     let accent = ui.ctx().data(|d| d.get_temp::<Color32>(egui::Id::unique("accent"))).unwrap_or(theme::RED);
     let x = |v: f32| egui::lerp(track.left()..=track.right(), (v - lo) / (hi - lo));
     let knob = pos2(x(value), track.center().y);
-    let from = x(from.unwrap_or(lo));
+    let from = x(fill_from.unwrap_or(lo));
     ui.painter().rect_filled(track, 2.0, theme::glass(0.15));
     ui.painter().rect_filled(Rect::from_min_max(pos2(from.min(knob.x), track.min.y), pos2(from.max(knob.x), track.max.y)), 2.0, accent);
     ui.painter().circle_filled(knob + vec2(0.0, 1.0), 7.0 + h, theme::shade(0.25));
@@ -4154,5 +4643,15 @@ mod settings_search_tests {
         // Jam and transfer use the same rows, with no search on their pages.
         assert!(!filtering());
         assert!(filter_hit("anything at all"));
+    }
+}
+
+#[cfg(test)]
+mod eq_preset_tests {
+    #[test]
+    fn every_equalizer_preset_has_a_message() {
+        for (name, _) in &crate::audio::eq::PRESETS {
+            assert!(super::eq_preset_message(name).is_some(), "{name}");
+        }
     }
 }

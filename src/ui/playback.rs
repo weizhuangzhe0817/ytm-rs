@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use crate::audio::AudioCmd;
 use crate::backend::{self, Req};
+use crate::link::Link;
 use crate::lyrics::Lyrics;
 use crate::model::Track;
 
@@ -129,13 +130,12 @@ impl App {
     /// Fetch the current song's art for the background and accent.
     pub(super) fn request_art(&mut self) {
         let Some(track) = self.current() else { return };
-        if self.art_key.as_deref() == Some(track.id.as_str()) {
+        if self.art_key.as_deref() == Some(track.id.as_str()) && !self.art_uncovered {
             return;
         }
-        if let Some(url) = backend::art_url(track) {
-            let key = track.id.clone();
-            self.backend.request(Req::Art { key, url });
-        }
+        // Asked for without a cover too: the answer takes the song before's colours away.
+        let (key, url) = (track.id.clone(), backend::art_url(track));
+        self.backend.request(Req::Art { key, url });
     }
 
     pub(super) fn play_list(&mut self, tracks: Vec<Track>, start: usize) {
@@ -146,10 +146,21 @@ impl App {
     pub(super) fn play_list_filling(&mut self, tracks: Vec<Track>, start: usize, fill: Option<QueueFill>) {
         // A song opened from a link, say: the next one that isn't explicit plays, if any.
         let hidden = tracks.get(start).is_some_and(|t| self.hide_explicit && t.explicit);
-        let played = self.queue.replace(tracks, start, fill);
+        // Shuffle stays on for the next list (#376), but not in someone else's jam, whose
+        // shuffle is the host's.
+        let played = if self.jam.guest() { self.queue.replace(tracks, start, fill) } else { self.queue.replace_keeping_shuffle(tracks, start, fill) };
         if hidden {
             self.toast(if played { crate::tr!("status-explicit-skipped") } else { crate::tr!("status-no-clean-tracks") });
         }
+        self.start_queue(played);
+        if played {
+            self.smart_mix();
+        }
+    }
+
+    /// Just `t`, for its radio to follow: the radio's order is its own, so shuffle goes off.
+    pub(super) fn play_for_radio(&mut self, t: Track) {
+        let played = self.queue.replace(vec![t], 0, None);
         self.start_queue(played);
     }
 
@@ -180,9 +191,15 @@ impl App {
         if !played {
             return;
         }
-        // Whatever was about to play doesn't.
-        self.play_pending = None;
+        self.drop_pending_play();
+        self.picked = true;
         self.play_current();
+    }
+
+    /// Whatever was about to play doesn't: something else does.
+    pub(super) fn drop_pending_play(&mut self) {
+        self.play_pending = None;
+        self.link_pending.take_if(|l| matches!(l, Link::Song { .. }));
     }
 
     /// Put last session's queue back, paused at the saved position, without loading audio.
@@ -233,6 +250,8 @@ impl App {
             return;
         }
         log::info!("picking up {} from another device ({} in its queue)", track.id, q.tracks.len());
+        self.note_where_left();
+        self.left_from = None;
         self.queue.adopt(q.tracks, q.index, None);
         self.ended = false;
         // Not a new play: an old song version mustn't come back with its video.
@@ -453,7 +472,15 @@ impl App {
     /// `swap`: the same play going on as its song version or its music video, from `at`.
     fn start_current(&mut self, at: Duration, report: bool, swap: bool) {
         let swap = std::mem::take(&mut self.resume_as_song) || swap;
+        let picked = std::mem::take(&mut self.picked) && std::env::var_os("YTM_SMOKE").is_none();
+        self.note_where_left();
+        // Noted again once it's playing: one that fails to start has got nowhere.
+        self.left_from = None;
         let Some(track) = self.current().cloned() else { return };
+        // A long track picked again picks up where it was left (not in a jam, which plays
+        // at the host's position). Come to by Next, the queue or radio, it starts over.
+        let resumed = (picked && at.is_zero() && report && !swap && !self.jam.active()).then(|| self.resume.at(&track.id)).flatten();
+        let at = resumed.unwrap_or(at);
         // Picking up mid-song (a resume, a download that broke off): the position is the
         // song version's when one was playing, so that goes on; a music video stays one.
         // Likewise a song's music video.
@@ -494,6 +521,29 @@ impl App {
         self.request_art();
         self.refresh_lyrics(shown);
         self.top_up();
+        if let Some(at) = resumed {
+            self.toast(crate::tr!("status-resumed-at", time = super::fmt_time(at.as_secs() as u32)));
+        }
+    }
+
+    /// Where the track playing was left, for a long one to pick up from there next time.
+    /// Not while it's still loading, which hasn't got anywhere yet, nor in a jam's guest,
+    /// which plays at the host's position.
+    pub(super) fn note_where_left(&mut self) {
+        let Some(id) = self.left_from.clone() else { return };
+        let at = self.current_at().as_secs() as u32;
+        let duration = (self.audio.status.duration_ms.load(Ordering::Relaxed) / 1000) as u32;
+        if self.buffering || duration == 0 || self.jam.guest() {
+            return;
+        }
+        self.resume.note(&id, at, duration);
+    }
+
+    /// The track playing played to its end: it starts from the top next time.
+    pub(super) fn left_at_end(&mut self) {
+        if let Some(id) = self.left_from.take() {
+            self.resume.forget(&id);
+        }
     }
 
     /// The playing track's title, artist and length for the system's media controls,
@@ -537,10 +587,21 @@ impl App {
     }
 
     /// Every frame: a jam starting or ending changes it too. Normal in a jam, where
-    /// everyone hears the same song at the same moment.
-    pub(super) fn sync_tempo(&self) {
-        self.audio.set_speed(if self.jam.active() || !self.tempo_on { 1.0 } else { self.speed });
+    /// everyone hears the same song at the same moment. Fast with the pitch kept, the
+    /// transpose can only go so low; it's held there, so what's shown is what's heard.
+    pub(super) fn sync_tempo(&mut self) {
+        let normal = self.jam.active() || !self.tempo_on;
+        if !normal {
+            self.transpose = self.transpose.max(crate::audio::tempo::lowest_semitones(self.speed, self.keep_pitch));
+        }
+        self.audio.set_speed(if normal { 1.0 } else { self.speed });
         self.audio.set_keep_pitch(self.keep_pitch);
+        self.audio.set_pitch(if normal { 0 } else { self.transpose });
+    }
+
+    /// Speed or transpose moved off normal.
+    pub(super) fn tempo_changed(&self) -> bool {
+        (self.speed - 1.0).abs() > 0.001 || self.transpose != 0
     }
 
     pub(crate) fn set_crossfade(&mut self) {
@@ -579,6 +640,10 @@ impl App {
     /// Stage the next track's decoder ahead of the current song's end for gapless handoff.
     pub(super) fn stage_next(&mut self, after: u64) {
         if after != self.generation || !self.gapless || self.crossfade || self.jam.guest() || !self.audio.status.started(after) {
+            return;
+        }
+        // A-B repeat goes back before the end: no next song to fetch on every pass.
+        if self.ab_stretch().is_some() {
             return;
         }
         let repeat_one = self.repeats_one();
@@ -638,6 +703,7 @@ impl App {
             // to `generation` by itself (`wanted_gen == generation`). Catch up as if the
             // previous song had finished so UI and engine stay on the same generation.
             if self.audio.status.wanted_gen.load(Ordering::Relaxed) == generation {
+                self.left_at_end();
                 let before = self.generation;
                 if !self.jam.guest() {
                     if self.repeats_one() {
@@ -657,6 +723,8 @@ impl App {
             return;
         }
         self.queue.started();
+        self.left_at_end();
+        self.left_from = self.current().map(|t| t.id.clone());
         self.generation = generation;
         self.recoveries = 0;
         self.skip_streak = 0;
@@ -703,16 +771,18 @@ impl App {
         self.queue.repeat == Repeat::One && !self.current().is_some_and(|t| self.hide_explicit && t.explicit)
     }
 
-    /// Applies Settings › Network › Allow local network scan: on, AirPlay speakers are
-    /// looked for; off, they're forgotten, and one playing hands the music back to the
-    /// system's default device.
+    /// Applies Settings › Playback › Find speakers on your network: on, speakers are looked
+    /// for; off, they're forgotten, and ones playing hand the music back to Windows' default
+    /// device.
     pub(super) fn set_local_network(&mut self) {
-        crate::airplay::set_allowed(self.local_network);
+        use crate::destination::{self, Destination};
+        destination::set_allowed(self.local_network);
         if self.local_network {
-            crate::airplay::discover();
-        } else if self.output_device.as_ref().is_some_and(|(id, _)| id.starts_with(crate::airplay::PREFIX)) {
-            self.output_device = None;
-            self.audio.send(crate::audio::AudioCmd::SetDevice(None));
+            destination::discover();
+        } else if self.destination.is_remote() {
+            self.destination = Destination::default();
+            self.destination_name.clear();
+            self.audio.send(crate::audio::AudioCmd::SetDestination(Destination::default()));
         }
     }
 
@@ -784,7 +854,9 @@ impl App {
         // where the video plays), and a segment marked on another cut skips wrong.
         let Some(duration) = self.audio.status.duration().map(|d| d.as_secs_f64()) else { return };
         let pos = self.audio.status.position().as_secs_f64();
-        let mut segs = segs.iter().filter(|s| s.fits(duration));
+        // Not one an A-B loop starts in: picked to be heard, and skipped it'd only go back there.
+        let from = self.ab_stretch().map(|(start, _)| start);
+        let mut segs = segs.iter().filter(|s| s.fits(duration) && !from.is_some_and(|a| a >= s.start && a < s.end));
         let Some(seg) = segs.clone().find(|s| pos >= s.start && pos < s.end - 0.3).copied() else {
             // Wake up for the next one even when nothing else repaints.
             if let Some(next) = segs.find(|s| s.start > pos) {
@@ -794,14 +866,18 @@ impl App {
         };
         self.segment_skipped = now;
         log::info!("sponsorblock: skipping {:.1}–{:.1} s", seg.start, seg.end);
-        if seg.end >= duration - 1.0 {
-            if self.repeats_one() {
-                self.play_current();
-            } else {
-                self.next();
+        match self.ab_stretch() {
+            // With A-B repeat, a skip to its end or past goes back to its start, as reaching
+            // the end would; any other stays in the song, which doesn't finish while it loops.
+            Some((start, end)) if pos >= end || seg.end >= end => self.loop_back(start),
+            None if seg.end >= duration - 1.0 => {
+                if self.repeats_one() {
+                    self.play_current();
+                } else {
+                    self.next();
+                }
             }
-        } else {
-            self.audio.send(AudioCmd::Seek(Duration::from_secs_f64(seg.end)));
+            _ => self.audio.send(AudioCmd::Seek(Duration::from_secs_f64(seg.end))),
         }
     }
 
@@ -839,6 +915,8 @@ impl App {
         if self.generation == generation {
             // Nothing to advance to yet. Cancel a buffered play too, and carry on
             // if more of the playlist or an autoplay queue arrives.
+            self.note_where_left();
+            self.left_from = None;
             self.clear_staged();
             self.generation = self.alloc_generation();
             self.audio.status.wanted_gen.store(self.generation, Ordering::Relaxed);

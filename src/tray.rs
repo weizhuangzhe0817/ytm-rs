@@ -19,7 +19,9 @@ use tray_icon::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIc
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Cmd {
-    Show,
+    /// A left click on the icon: brings the window back, or plays/pauses if the setting says
+    /// so. A double-click is two of these (on Windows, its own event between them is ignored).
+    Click,
     /// The menu's "Show"/"Hide" item: whichever it says.
     Toggle,
     PlayPause,
@@ -30,6 +32,15 @@ pub enum Cmd {
 }
 
 static PENDING: Mutex<Vec<Cmd>> = Mutex::new(Vec::new());
+
+/// How soon a second click makes a double-click: the system's on Windows, macOS's default there.
+pub fn double_click_time() -> std::time::Duration {
+    #[cfg(windows)]
+    // SAFETY: no arguments; it only reads a setting.
+    return std::time::Duration::from_millis(unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetDoubleClickTime() }.into());
+    #[cfg(not(windows))]
+    std::time::Duration::from_millis(500)
+}
 
 /// The tray can't work on this system (no AppIndicator library, or GTK won't start):
 /// the setting turns itself off and says why under it.
@@ -80,7 +91,7 @@ impl Tray {
             let w = wake.clone();
             TrayIconEvent::set_event_handler(Some(move |e: TrayIconEvent| {
                 if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } = e {
-                    push(Cmd::Show, &w);
+                    push(Cmd::Click, &w);
                 }
             }));
             MenuEvent::set_event_handler(Some(move |e: MenuEvent| match e.id.as_ref() {
@@ -270,7 +281,7 @@ mod gtk_thread {
                 rx.recv().map_err(|e| e.to_string())?
             })
             .clone()
-            .map_err(|e| Unsupported(format!("The tray icon needs GTK, which couldn't start ({e}).")).into())
+            .map_err(|e| Unsupported(crate::tr!("settings-tray-no-gtk", error = e)).into())
     }
 
     /// The names libappindicator-sys 0.9.0 loads the AppIndicator library by, in its
@@ -314,11 +325,7 @@ mod gtk_thread {
     pub fn show(png: image::RgbaImage) -> anyhow::Result<()> {
         if let Err(e) = load_appindicator() {
             log::warn!("tray: no AppIndicator library: {e}");
-            return Err(Unsupported(
-                "The tray icon needs the AppIndicator library, which isn't installed: libayatana-appindicator3-1 on Debian and Ubuntu, libayatana-appindicator-gtk3 on Fedora (on Bazzite, Silverblue and other atomic systems: rpm-ostree install libayatana-appindicator-gtk3, then restart the computer), libayatana-appindicator on Arch."
-                    .to_owned(),
-            )
-            .into());
+            return Err(Unsupported(crate::tr!("settings-tray-no-appindicator").to_owned()).into());
         }
         start()?;
         let (tx, rx) = std::sync::mpsc::channel();

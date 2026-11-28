@@ -23,21 +23,32 @@ status-like-refused = YouTube Music ने परिवर्तन स्वी
 status-refused-count = YouTube Music ने इनकार कर दिया: { $count }
 status-removed-liked = पसंद किए गए गानों से हटा दिया गया
 status-download-batch = डाउनलोडिंग ट्रैक: { $count }
-status-download-collection = "{ $title }" से डाउनलोडिंग: { $count }
+status-download-collection = “{ $title }” से डाउनलोडिंग: { $count }
 status-download-stopped = डाउनलोड करना बंद कर दिया गया{ $name }: { $songs } सहेजा गया
 status-download-already = पहले ही डाउनलोड किया जा चुका है
-status-download-name-already = "{ $title }" पहले ही डाउनलोड हो चुका है
+status-download-name-already = “{ $title }” पहले ही डाउनलोड हो चुका है
 status-download-done = डाउनलोड किया गया{ $name }: { $songs }
 status-download-already-count = { $count } पहले से ही मौजूद है
 status-download-fail-count = { $count } डाउनलोड नहीं किया जा सका ({ $details })
-status-play-premium = "{ $title }" को YouTube Music Premium की आवश्यकता है
-status-play-sign-in = "{ $title }" खेलने के लिए साइन इन करें
+status-play-premium = “{ $title }” को YouTube Music Premium की आवश्यकता है
+status-play-sign-in = “{ $title }” खेलने के लिए साइन इन करें
 status-age-restricted = यह आयु-प्रतिबंधित है
 status-songs = { $count ->
     [one] { $count } गाना
    *[other] { $count } गाने
 }
 status-episodes = { $count } एपिसोड
-status-download-quoted-title = "{ $title }"
+status-plays = { $count ->
+    [one] { $shown } बार चला
+   *[other] { $shown } बार चला
+}
+status-subscribers = { $count ->
+    [one] { $shown } सदस्य
+   *[other] { $shown } सदस्य
+}
+status-download-quoted-title = “{ $title }”
 discord-view-artist = कलाकार देखें
 discord-view-album = एल्बम देखें
+status-kept-downloaded = डाउनलोड रखा: इस प्लेलिस्ट में जोड़े गाने भी डाउनलोड होते हैं
+status-not-kept-downloaded = अब डाउनलोड नहीं रखा जाता। जो गाने डाउनलोड हो चुके हैं, वे रहते हैं
+status-resumed-at = जहाँ छोड़ा था, वहीं से, { $time } पर

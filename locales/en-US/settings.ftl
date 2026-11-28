@@ -15,14 +15,29 @@ settings-account = Account
 settings-general = General
 settings-keyboard-shortcuts = Keyboard shortcuts
 settings-about = About
+settings-content-and-ratings = Content & ratings
+settings-advanced = Advanced
+# The headings the categories are grouped under, down the side.
+settings-group-listening = Listening
+settings-group-look = Look
+settings-group-accounts = Accounts
+settings-group-app = App
+# Above the settings a search finds, where a category's name goes otherwise.
+settings-search-results = Search results
+# Sections: what's shown (Content & ratings), and light or dark and the accent (Themes).
+settings-content = Content
+settings-colours = Colours
 settings-no-match = No settings match "{ $query }"
 settings-title = Settings
 settings-search-box = Search settings
 settings-clear = Clear
+# A button above the settings, there while one changed here waits for the next start.
+settings-restart-to-apply = Restart to apply
 
 ## Account
 
 settings-signed-in-desc = Signed in with Google. Your home feed, library and likes come from this account. Saved encrypted in Windows Credential Manager.
+settings-signed-in-desc-system = Signed in with Google. Your home feed, library and likes come from this account. Saved in the system's keyring, or, if it can't be used, in a file only you can read.
 settings-sign-out = Sign out
 settings-channel = Channel
 settings-channel-desc = Your Google account and each YouTube channel it manages have their own library, likes, history and recommendations.
@@ -88,14 +103,27 @@ settings-fade-when-pausing = Fade when pausing
 settings-fade-when-pausing-desc = Turn the music down when you pause, and back up when you play again, over a fifth of a second. Off, it stops and starts right away.
 settings-high-quality-audio = High quality audio
 settings-high-quality-audio-desc = 256 kbps instead of 128 kbps, for accounts with YouTube Premium. Applies from the next song.
-settings-output-device = Output device
-settings-output-device-desc = Where the music plays: this computer's speakers or headphones, or an AirPlay speaker on your network (with Settings › Network › Allow local network scan on). A picked device that isn't connected leaves it to Windows' default until it's back.
+settings-output-device = Play on
+settings-output-device-desc = Where the music plays: this computer's speakers or headphones, or a speaker on your network (with Find speakers on your network on). One picked that isn't there leaves it to Windows' default until it's back.
+settings-output-device-desc-system = Where the music plays: this computer's speakers or headphones, or a speaker on your network (with Find speakers on your network on). One picked that isn't there leaves it to the system's default until it's back.
+settings-this-computer = This computer
+settings-on-your-network = On your network
+settings-playing-on = Playing on { $name }
+# The player bar's "Play on" button, with speakers picked that aren't playing (not found yet, or let go of while nothing plays).
+settings-play-on-picked = Play on: { $name }
+settings-connecting-to = Connecting to { $name }…
+settings-couldnt-play-on = Couldn't play on { $name }: playing on this computer
 settings-windows-default = Windows default
+settings-system-default = System default
 settings-not-connected = { $name } (not connected)
-settings-airplay-device = { $name } (AirPlay)
 settings-normalization-off-desc = Songs play as loud as they were made. Normal brings them all to the same level, and Quiet to the same, lower one.
 settings-normalization-normal-desc = Songs play at the same level: loud ones turned down, as on YouTube Music, and quiet ones up by as much as 6 dB.
 settings-normalization-quiet-desc = Songs play at the same, lower level: loud ones turned down further, so quiet ones rarely need turning up.
+# After the level's description, while a song plays: what normalization does to it. { $db } is a number of decibels, such as 3.2.
+settings-normalization-song-no-figure = This song: no loudness figure from YouTube, so it plays as it is.
+settings-normalization-song-level = This song: already at the level.
+settings-normalization-song-up = This song: turned up { $db } dB.
+settings-normalization-song-down = This song: turned down { $db } dB.
 settings-headphone-crossfeed = Headphone crossfeed
 settings-headphone-crossfeed-desc = Let each ear hear a little of the other side's bass, as from speakers in front of you, so songs panned hard to one side are easier on the ears over headphones.
 settings-mono-audio = Mono audio
@@ -111,6 +139,17 @@ settings-equalizer-desc = Shape the sound from deep bass to treble. Only what yo
 settings-preset = Preset
 settings-custom = Custom
 settings-equalizer-preset = Equalizer preset
+# The equalizer's presets.
+settings-eq-flat = Flat
+settings-eq-bass-boost = Bass boost
+settings-eq-treble-boost = Treble boost
+settings-eq-vocal = Vocal
+settings-eq-rock = Rock
+settings-eq-pop = Pop
+settings-eq-electronic = Electronic
+settings-eq-acoustic = Acoustic
+settings-eq-classical = Classical
+settings-eq-late-night = Late night
 # Not shown: words a search in Settings finds the equalizer by.
 settings-equalizer-search-words = Equalizer bands bass mids treble frequency
 settings-prevent-clipping = Prevent clipping
@@ -120,10 +159,13 @@ settings-0-db = 0 dB
 ## Playback speed
 
 settings-playback-speed = Playback speed
-settings-playback-speed-desc = Play songs faster or slower, also from a button in the player bar. Lyrics stay in time. Back to 1× each time ytm-rs starts.
+settings-playback-speed-desc = Play songs faster or slower, or in another key, also from a button in the player bar. Lyrics stay in time. Back to normal each time ytm-rs starts.
 settings-speed = Speed
 settings-keep-pitch = Keep the pitch
 settings-keep-pitch-desc = Faster or slower without sounding higher or lower. Off, the pitch changes with the speed, like a record.
+settings-speed-pitch = Speed and pitch
+settings-transpose = Transpose
+settings-transpose-desc = Higher or lower by semitones, at the same speed. 12 is an octave.
 settings-playback-speed-jam-note = Back to normal while you're in a jam, so everyone hears the same song.
 
 ## Music videos
@@ -151,6 +193,8 @@ settings-romanization-desc = Japanese, Korean, Chinese, Cyrillic and other scrip
 settings-translation = Translation
 settings-translation-desc = Translated by Unison, or Google when it can't. Lyrics that ship their own translation use it.
 settings-translate-into = Translate into
+settings-lyrics-look = Lyrics style
+settings-lyrics-look-desc = Another theme's lyrics, such as Spicy's, while the rest of the app keeps yours.
 settings-text-size = Text size
 settings-text-size-desc = Make the lyrics larger or smaller. Works on top of the theme's own size.
 settings-larger = Larger
@@ -215,6 +259,8 @@ settings-background-brightness = Background brightness
 settings-background-brightness-desc = Make the album art behind Now playing and the pages brighter or darker. 100% is the theme's own.
 settings-brighter = Brighter
 settings-darker = Darker
+settings-animation-speed = Animation speed
+settings-animation-speed-desc = How fast pages, menus and panels move and fade in. Lyrics keep time with the song. 100% is the theme's own.
 settings-flat-background = Flat background
 settings-flat-background-desc = One colour behind the pages and Now playing, with no album art and no gradient.
 settings-flat-background-colour = Background colour
@@ -248,6 +294,14 @@ settings-pill-mini-player-desc = Experimental. A small pill that shows its contr
 settings-pill-mini-player-desc-needs-opengl = Experimental. A small pill that shows its controls when you point at it. Needs OpenGL, not Vulkan.
 settings-mini-player = Mini player
 settings-pill-mini-player = Pill mini player
+settings-mini-autohide = Auto-hide controls
+settings-mini-autohide-desc = In lyrics mode, the top bar and player controls slide away, leaving only the lyrics. They come back while you point at the mini player.
+settings-mini-pill-extended = Keep the pill extended in lyrics mode
+settings-mini-pill-extended-desc = The mini player stays at its hovered width while lyrics are showing, giving the line more room. Pointing at it still shows the controls.
+settings-mini-cover-bg = Cover art background
+settings-mini-cover-bg-desc = The song's cover art fills the mini player card, dimmed behind the lyrics and controls.
+settings-mini-cover-blur = Cover blur index
+settings-mini-cover-opacity = Cover opacity
 settings-keep-on-top = Keep on top
 settings-keep-on-top-desc = The mini player stays above other windows.
 settings-pill-mini-player-restart-desc = The mini player changes style from the next start.
@@ -263,6 +317,15 @@ settings-app-icon = App icon
 settings-preview = Preview
 settings-preview-desc = How it looks on the taskbar and in the tray.
 settings-app-icon-named = App icon: { $name }
+# The app icons' names. "YT Music" and "Fluent" stay as they are.
+settings-app-icon-classic = Classic
+settings-app-icon-smile-ring = Smile ring
+settings-app-icon-rust-gear = Rust gear
+settings-app-icon-waveform = Waveform
+settings-app-icon-record = Record
+settings-app-icon-lit-line = Lit line
+settings-app-icon-duet = Duet
+settings-app-icon-warp = Warp
 
 ## Connections
 
@@ -270,6 +333,8 @@ settings-stream-deck = Stream Deck
 settings-stream-deck-desc = Let a Stream Deck plugin on this computer control playback.
 settings-lastfm-connected = Scrobbling what you play to { $name }'s profile.
 settings-lastfm-allow = Allow ytm-rs on the Last.fm page that opened in your browser.
+# After "Last.fm: ", when signing in wasn't allowed on that page in time.
+settings-lastfm-not-allowed = Last.fm wasn't allowed in time
 settings-lastfm-desc = Scrobble what you play to your Last.fm profile.
 settings-disconnect = Disconnect
 settings-connect = Connect
@@ -278,6 +343,9 @@ settings-listenbrainz-desc = Send what you play to your ListenBrainz profile.
 settings-user-token = User token
 settings-listenbrainz-token-hint = Paste your ListenBrainz user token
 settings-listenbrainz-token-link = Get your token on listenbrainz.org
+# After "ListenBrainz: ", when Connect is pressed.
+settings-listenbrainz-token-missing = paste your user token first
+settings-listenbrainz-token-refused = ListenBrainz didn't accept that token
 
 ## Language
 
@@ -285,9 +353,7 @@ settings-listenbrainz-token-link = Get your token on listenbrainz.org
 settings-language-system = System ({ $language })
 settings-language = Language
 settings-language-desc = The app's own words. Song titles, names and YouTube Music's shelves come in the Song info language below.
-settings-restart-to-apply = Restart to apply
 settings-language-restart-desc = The app changes language from the next start.
-settings-restart-now = Restart now
 
 ## Song info: the language and country YouTube Music answers in. Separate from Language above.
 
@@ -306,6 +372,11 @@ settings-home = Home
 settings-close-to-tray-desc-linux = Keeps an icon in the tray. Clicking × hides the window there and keeps the music playing. The icon's menu brings it back, hides it or quits. Clicking the song in the system's media controls brings it back too, and Ctrl+Q quits.
 settings-close-to-tray-desc = Keeps an icon in the tray. Clicking × hides the window there and keeps the music playing. Click the icon to bring it back, or right-click it to hide, show or quit.
 settings-close-to-tray = Close to tray
+settings-tray-click-plays = Click the tray icon to play or pause
+settings-tray-click-plays-desc = A click on the icon plays or pauses, a moment later, instead of bringing the window back. A double-click brings it back, as does a click with nothing to play.
+# Under Close to tray on Linux, when the tray icon can't work there. { $error } is what GTK said.
+settings-tray-no-gtk = The tray icon needs GTK, which couldn't start ({ $error }).
+settings-tray-no-appindicator = The tray icon needs the AppIndicator library, which isn't installed: libayatana-appindicator3-1 on Debian and Ubuntu, libayatana-appindicator-gtk3 on Fedora (on Bazzite, Silverblue and other atomic systems: rpm-ostree install libayatana-appindicator-gtk3, then restart the computer), libayatana-appindicator on Arch.
 settings-song-notifications-desc = When a new song starts while the window is minimized, in the tray or behind other windows, show its title, artist and cover in a notification.
 settings-song-notifications-unavailable = Needs the installed app: Windows only shows notifications from apps in the Start menu.
 settings-song-notifications = Song notifications
@@ -340,15 +411,21 @@ settings-file-lyrics-off = None
 settings-network = Network
 settings-backup-stream = Backup stream when songs stop
 settings-backup-stream-desc = Signed in, when YouTube stops a song with a bot check (this can happen on a VPN), play it from a stream that comes with the video. Uses more data.
-settings-local-network = Allow local network scan
+settings-local-network = Find speakers on your network
 settings-local-network-desc = Look for AirPlay speakers on your network, so the music can play on them. Your firewall may ask once to let the app through.
-settings-airplay-searching = Looking for AirPlay speakers…
+settings-local-network-hint = Your firewall may ask to let the app through
+settings-airplay-searching = Looking for speakers…
+settings-speakers-searching-more = Looking for more…
+settings-speakers-none = No speakers found
 settings-backup-stream-prompt-title = Playback stopped
 settings-backup-stream-prompt-body = YouTube stopped this song with a bot check, which can happen on a VPN. A backup stream can play it instead. It comes with the video, so it uses more data.
 settings-backup-stream-prompt-enable = Turn on and retry
 settings-backup-stream-prompt-settings = Settings
 settings-backup-stream-prompt-dismiss = Not now
 settings-proxy = Proxy
+settings-proxy-use-system = Use Windows settings
+settings-proxy-use-system-system = Use system settings
+settings-proxy-off = No proxy
 settings-proxy-desc = Send everything ytm-rs fetches through a proxy: songs, lyrics, sign-in and Listen together.
 settings-proxy-windows-uses = Windows is set to use { $proxy }.
 settings-proxy-windows-none = Windows isn't set to use a proxy, so ytm-rs connects directly.
@@ -361,17 +438,32 @@ settings-address = Address
 settings-saved = Saved
 settings-save = Save
 settings-proxy-password-note = A password in the address is kept in Windows Credential Manager.
+settings-proxy-password-note-system = A password in the address is kept in the system's keyring, or, if it can't be used, in a file only you can read.
 settings-checking = Checking…
 settings-proxy-test-desc = Checks that YouTube Music answers through this setting.
 settings-test-connection = Test connection
 settings-test = Test
 settings-test-working = Working: YouTube Music answered in { $ms } ms.
 settings-test-failed = Didn't connect: { $error }
+# Under the proxy address, when it isn't one.
+settings-proxy-not-an-address = that isn't a proxy address, like http://127.0.0.1:8080
+settings-proxy-scheme = use an http:// or socks5:// address
+settings-proxy-no-host = the address needs a host
+settings-proxy-no-port = the address needs a port, like :8080
+# After "Didn't connect: ", why the proxy didn't work. { $address } is its host and port.
+settings-proxy-not-answering = nothing is answering at { $address }. Is the proxy running?
+settings-proxy-timed-out = the proxy didn't answer in time.
+settings-proxy-sign-in-refused = the proxy didn't accept the username or password.
+settings-proxy-not-found = couldn't find that proxy's address.
 settings-proxy-restart-desc = The new proxy setting is used from the next start.
 
 ## Storage
 
 settings-cache-cleared = Cache cleared: { $size } freed
+# How much the cache takes up, or a clear freed. { $size } is a number, such as 12 or 1.4.
+settings-size-mb = { $size } MB
+settings-size-gb = { $size } GB
+settings-size-under-mb = Less than 1 MB
 settings-storage = Storage
 settings-clearing = Clearing…
 settings-measuring = Measuring…
@@ -385,6 +477,7 @@ settings-space = Space
 settings-next-previous-song = Next / previous song
 settings-ctrl = Ctrl
 settings-volume-up-down = Volume up / down
+settings-shortcut-seek = Back / forward 5 seconds in the song
 settings-shortcut-command-palette = Command palette: pages, settings, playlists and actions
 settings-search = Search
 settings-shortcut-find-in-list = Find in a song list
@@ -431,6 +524,9 @@ settings-download = Download
 settings-check-now = Check now
 settings-another-copy = Another copy
 settings-another-copy-desc = ytm-rs is also installed from { $kind }. To remove that copy, run { $cmd }
+# { $kind } above, for the copy from the .deb or from the Arch package (install.sh stays as it is).
+settings-another-copy-deb = the .deb
+settings-another-copy-arch = the Arch package
 settings-whats-new = What's new
 settings-whats-new-in = What's new in { $version }
 

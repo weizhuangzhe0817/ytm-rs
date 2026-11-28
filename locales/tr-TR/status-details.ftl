@@ -35,6 +35,17 @@ status-play-sign-in = “{ $title }” oynamak için oturum açın
 status-age-restricted = yaş sınırlaması var
 status-songs = { $count } şarkı
 status-episodes = { $count } bölüm
+status-plays = { $count ->
+    [one] { $shown } çalma
+   *[other] { $shown } çalma
+}
+status-subscribers = { $count ->
+    [one] { $shown } abone
+   *[other] { $shown } abone
+}
 status-download-quoted-title = “{ $title }”
 discord-view-artist = Sanatçıyı görüntüle
 discord-view-album = Albümü görüntüle
+status-kept-downloaded = İndirilmiş tut: bu çalma listesine eklenen şarkılar da indirilir
+status-not-kept-downloaded = Artık indirilmiş tutulmuyor. İndirilmiş şarkılar durur
+status-resumed-at = Kaldığınız yerden, { $time } konumundan

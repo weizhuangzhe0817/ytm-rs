@@ -1,5 +1,11 @@
-### Player controls and synced lyrics.
+### The player: the bar along the bottom, now playing and the mini player.
 
+# For screen readers, on the time beside the progress line ("0:36 / 1:27"), which a
+# click switches to the time left ("-0:51 / 1:27") and back. { $time } is the time as shown.
+player-time-show-left = { $time }. Показати час, що лишився
+player-time-show-length = { $time }. Показати тривалість треку
+
+# From the interface-wide catalog (#228).
 player-full-screen = Повноекранний режим
 player-exit-full-screen = Вийти з повноекранного режиму
 player-pip = Картинка в картинці
@@ -19,6 +25,8 @@ player-sync-none = Без синхронізації
 player-lyrics-source = Джерело тексту
 player-only-lyrics-source = Джерело тексту · знайдено лише одне
 player-lyrics-source-name = Джерело тексту: { $name }
+player-lyrics-from-unison = Текст від Unison
+player-lyrics-submitted-by = від { $name }
 player-timing = Синхронізація
 player-lyrics-later = Текст пізніше (+0,1 с)
 player-lyrics-earlier = Текст раніше (−0,1 с)
@@ -49,3 +57,7 @@ player-play-next = Відтворити наступним
 player-start-radio = Увімкнути радіо
 player-go-to-album = До альбому
 player-go-to-artist = До виконавця
+player-sleep-timer = Таймер сну
+player-sleep-off = Вимк.
+player-sleep-minutes = { $minutes } хв
+player-sleep-song-end = Кінець треку

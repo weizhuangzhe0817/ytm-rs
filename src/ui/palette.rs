@@ -93,32 +93,34 @@ struct Entry {
 /// Settings' categories and sections, by their titles. One named as its category opens
 /// that; any other is looked for with Settings' own search.
 /// As Settings titles them, in this run's language: a search for one finds it there.
-fn sections() -> [(&'static str, SettingsTab); 22] {
+fn sections() -> [(&'static str, SettingsTab); 30] {
     use SettingsTab::*;
-    [
-        (tr!("settings-account"), Account),
-        (tr!("settings-connections"), Connections),
-        (tr!("settings-playback"), Playback),
-        (tr!("settings-sound"), Playback),
-        (tr!("settings-music-videos"), Playback),
-        (tr!("settings-equalizer"), Playback),
+    let mut all = [("", Account); 30];
+    // Each category as itself, then the sections that aren't named as theirs.
+    for (slot, tab) in all.iter_mut().zip(SettingsTab::ALL) {
+        *slot = (tab.label(), tab);
+    }
+    all[18..].copy_from_slice(&[
         (tr!("settings-playback-speed"), Playback),
-        (tr!("settings-lyrics"), Lyrics),
         (tr!("settings-lyrics-timing"), Lyrics),
         (tr!("settings-lyrics-sources"), Lyrics),
-        (tr!("settings-appearance"), Appearance),
-        (tr!("settings-mini-player"), Appearance),
-        (tr!("settings-app-icon"), Appearance),
-        (tr!("settings-general"), General),
+        (tr!("settings-content"), Content),
+        (tr!("settings-song-ratings"), Content),
+        (tr!("settings-colours"), Themes),
+        (crate::tr!("transfer-import"), Connections),
         (tr!("settings-window"), General),
-        (tr!("settings-downloads"), General),
-        (tr!("settings-network"), General),
-        (crate::tr!("transfer-import"), General),
-        (tr!("settings-keyboard-shortcuts"), Shortcuts),
         (crate::tr!("extra-system-shortcuts"), Shortcuts),
+        (tr!("settings-network"), Advanced),
+        (tr!("settings-storage"), Advanced),
         (tr!("settings-updates"), About),
-        (tr!("settings-about"), About),
-    ]
+    ]);
+    all
+}
+
+impl Palette {
+    pub(super) fn is_open(&self) -> bool {
+        self.open
+    }
 }
 
 /// Ctrl+K opens and closes it. Taken before any text box sees it: there, it would delete
@@ -443,8 +445,7 @@ fn row(ui: &mut Ui, e: &Entry, selected: bool, unlike: Option<egui::Id>, enter_p
     let x = rect.left() + 42.0;
     let g = widgets::galley(ui, &e.label, theme::regular(14.0), theme::text(), rect.right() - 12.0 - detail_w - x);
     let pos = pos2(x, mid - g.size().y / 2.0);
-    ui.painter().galley(pos, g.clone(), theme::text());
-    widgets::tip_if_elided(ui, Rect::from_min_size(pos, g.size()), &g, &e.label);
+    widgets::galley_tipped(ui, pos, g, theme::text(), &e.label);
     let activated = gesture.map_or_else(|| resp.clicked(), |gesture| gesture.activate);
     (resp, activated)
 }
@@ -464,12 +465,16 @@ fn run_command(app: &mut App, ctx: &egui::Context, cmd: Command) {
             // Going there clears Settings' search, so this comes after.
             app.go(Page::Settings);
             app.settings_tab = tab;
+            app.settings_page = true;
             if name != tab.label() {
                 app.settings_query = name.to_owned();
             }
         }
         Command::Open(target) => app.actions.push(Action::Open(target)),
-        Command::Search(q) => app.actions.push(Action::Go(Page::Search(q))),
+        Command::Search(q) => app.actions.push(match crate::link::parse(&q) {
+            Some(link) => Action::OpenLink(link, false),
+            None => Action::Go(Page::Search(q)),
+        }),
         Command::Act(a) => match a {
             Act::TogglePlay => app.actions.push(Action::TogglePlay),
             Act::Next => app.next(),

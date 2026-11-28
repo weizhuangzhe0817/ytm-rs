@@ -1,5 +1,11 @@
-### Player controls and synced lyrics.
+### The player: the bar along the bottom, now playing and the mini player.
 
+# For screen readers, on the time beside the progress line ("0:36 / 1:27"), which a
+# click switches to the time left ("-0:51 / 1:27") and back. { $time } is the time as shown.
+player-time-show-left = { $time }. Hiện thời gian còn lại
+player-time-show-length = { $time }. Hiện độ dài bài hát
+
+# From the interface-wide catalog (#228).
 player-full-screen = Toàn màn hình
 player-exit-full-screen = Thoát toàn màn hình
 player-pip = Hình trong hình
@@ -19,6 +25,8 @@ player-sync-none = Không được đồng bộ hóa
 player-lyrics-source = Nguồn lời bài hát
 player-only-lyrics-source = Nguồn lời bài hát · chỉ tìm thấy một
 player-lyrics-source-name = Nguồn lời bài hát: { $name }
+player-lyrics-from-unison = Lời từ Unison
+player-lyrics-submitted-by = gửi bởi { $name }
 player-timing = Thời gian
 player-lyrics-later = Lời bài hát sau (+0,1 s)
 player-lyrics-earlier = Lời bài hát trước đó (−0,1 s)
@@ -49,3 +57,7 @@ player-play-next = Chơi tiếp
 player-start-radio = Bắt đầu đài
 player-go-to-album = Đi tới album
 player-go-to-artist = Tới nghệ sĩ
+player-sleep-timer = Hẹn giờ tắt
+player-sleep-off = Tắt
+player-sleep-minutes = { $minutes } phút
+player-sleep-song-end = Hết bài hát

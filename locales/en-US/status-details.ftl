@@ -10,6 +10,7 @@ status-playlist-created = Playlist created
 status-new-playlist-tracks = Tracks added to new playlist: { $count }
 status-playlist-added = Added to playlist
 status-playlist-updated = Playlist updated
+status-picture-unreadable = Couldn't read that picture. Try a JPEG, PNG or WebP.
 status-playlist-sorted = Playlist sorted
 status-playlist-sort-failed = Couldn't sort the playlist
 status-playlist-move-failed = YouTube Music didn't take that move
@@ -41,6 +42,18 @@ status-episodes = { $count ->
     [one] { $count } episode
    *[other] { $count } episodes
 }
+# { $shown } is { $count } written short: "1.2M".
+status-plays = { $count ->
+    [one] { $shown } play
+   *[other] { $shown } plays
+}
+status-subscribers = { $count ->
+    [one] { $shown } subscriber
+   *[other] { $shown } subscribers
+}
 status-download-quoted-title = “{ $title }”
 discord-view-artist = View artist
 discord-view-album = View album
+status-kept-downloaded = Kept downloaded: songs added to this playlist are downloaded too
+status-not-kept-downloaded = No longer kept downloaded. Songs downloaded already stay
+status-resumed-at = Picking up where you left off, at { $time }

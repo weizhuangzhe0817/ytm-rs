@@ -23,6 +23,7 @@ settings-clear = Leeren
 ## Account
 
 settings-signed-in-desc = Über Google angemeldet. Startseite, Mediathek und Likes stammen aus diesem Konto. Die Anmeldung wird verschlüsselt in der Windows-Anmeldeinformationsverwaltung gespeichert.
+settings-signed-in-desc-system = Über Google angemeldet. Startseite, Mediathek und Likes stammen aus diesem Konto. Die Anmeldung liegt im Schlüsselbund des Systems oder, wenn der nicht benutzt werden kann, in einer Datei, die nur du lesen kannst.
 settings-sign-out = Abmelden
 settings-channel = Kanal
 settings-channel-desc = Dein Google-Konto und jeder darüber verwaltete YouTube-Kanal haben eine eigene Mediathek, eigene Likes, einen eigenen Verlauf und eigene Empfehlungen.
@@ -41,6 +42,8 @@ settings-autoplay = Automatische Wiedergabe
 settings-autoplay-desc = Spielt ähnliche Titel weiter, wenn die Warteschlange zu Ende ist.
 settings-smart-shuffle = Smart Shuffle
 settings-smart-shuffle-desc = Beim Zufallsmodus werden ähnliche Songs wie der laufende eingemischt, einer nach jeweils drei. Sie verschwinden wieder, wenn der Zufallsmodus ausgeschaltet wird.
+settings-gapless-playback = Lückenlose Wiedergabe
+settings-gapless-playback-desc = Spielt aufeinanderfolgende Titel ohne Pause, für Alben und Live-Aufnahmen, die ineinander übergehen.
 settings-crossfade-songs = Titel überblenden
 settings-crossfade-songs-desc = Der nächste Titel setzt ein, während der aktuelle ausklingt.
 settings-crossfade-length = Überblenddauer
@@ -82,15 +85,29 @@ settings-sound = Ton
 settings-volume-normalization = Lautstärke normalisieren
 settings-logarithmic-volume = Logarithmische Lautstärke
 settings-logarithmic-volume-desc = Passt den Lautstärkeregler dem menschlichen Gehör an und gibt leisen Stufen mehr Platz.
+settings-fade-when-pausing = Sanftes Ausblenden beim Pausieren
+settings-fade-when-pausing-desc = Blendet die Musik beim Pausieren innerhalb von 0,2 Sekunden aus und beim Fortsetzen wieder ein. Ausgeschaltet stoppt und startet sie sofort.
 settings-high-quality-audio = Hohe Audioqualität
 settings-high-quality-audio-desc = 256 statt 128 kbit/s für Konten mit YouTube Premium. Gilt ab dem nächsten Titel.
-settings-output-device = Ausgabegerät
-settings-output-device-desc = Legt fest, wo die Musik ausgegeben wird. Ist das gewählte Gerät getrennt, übernimmt vorübergehend das Windows-Standardgerät.
+settings-output-device = Wiedergabe auf
+settings-output-device-desc = Wo die Musik spielt: die Lautsprecher oder Kopfhörer dieses Computers oder ein Lautsprecher im Netzwerk (mit Lautsprecher im Netzwerk suchen an). Ein gewähltes, das nicht da ist, überlässt es bis zur Rückkehr dem Windows-Standard.
+settings-output-device-desc-system = Wo die Musik spielt: die Lautsprecher oder Kopfhörer dieses Computers oder ein Lautsprecher im Netzwerk (mit Lautsprecher im Netzwerk suchen an). Ein gewähltes, das nicht da ist, überlässt es bis zur Rückkehr dem Systemstandard.
+settings-this-computer = Dieser Computer
+settings-on-your-network = In deinem Netzwerk
+settings-playing-on = Wiedergabe auf { $name }
+settings-play-on-picked = Wiedergabe auf: { $name }
+settings-connecting-to = Verbinden mit { $name }…
+settings-couldnt-play-on = Wiedergabe auf { $name } nicht möglich: Wiedergabe auf diesem Computer
 settings-windows-default = Windows-Standard
+settings-system-default = Systemstandard
 settings-not-connected = { $name } (nicht verbunden)
 settings-normalization-off-desc = Titel behalten ihre ursprüngliche Lautstärke. „Normal“ gleicht sie an, „Leise“ gleicht sie auf niedrigerem Niveau an.
 settings-normalization-normal-desc = Titel klingen gleich laut. Laute werden wie bei YouTube Music abgesenkt, leise um bis zu 6 dB angehoben.
 settings-normalization-quiet-desc = Titel klingen gleich laut auf niedrigerem Niveau. Laute werden stärker abgesenkt, sodass leise selten angehoben werden müssen.
+settings-normalization-song-no-figure = Dieser Titel: keine Lautheitsangabe von YouTube, er wird unverändert abgespielt.
+settings-normalization-song-level = Dieser Titel: bereits auf dem Zielpegel.
+settings-normalization-song-up = Dieser Titel: um { $db } dB lauter.
+settings-normalization-song-down = Dieser Titel: um { $db } dB leiser.
 settings-headphone-crossfeed = Crossfeed für Kopfhörer
 settings-headphone-crossfeed-desc = Mischt etwas Bass des jeweils anderen Kanals hinzu, ähnlich wie bei Lautsprechern vor dir. Das macht stark seitlich gemischte Titel über Kopfhörer angenehmer.
 settings-mono-audio = Mono-Audio
@@ -106,6 +123,16 @@ settings-equalizer-desc = Passt den Klang von tiefen Bässen bis zu den Höhen a
 settings-preset = Voreinstellung
 settings-custom = Benutzerdefiniert
 settings-equalizer-preset = Equalizer-Voreinstellung
+settings-eq-flat = Neutral
+settings-eq-bass-boost = Bass-Boost
+settings-eq-treble-boost = Höhen-Boost
+settings-eq-vocal = Gesang
+settings-eq-rock = Rock
+settings-eq-pop = Pop
+settings-eq-electronic = Elektronisch
+settings-eq-acoustic = Akustisch
+settings-eq-classical = Klassik
+settings-eq-late-night = Spätabends
 # Not shown: words a search in Settings finds the equalizer by.
 settings-equalizer-search-words = Equalizer Bänder Bass Mitten Höhen Frequenz
 settings-prevent-clipping = Übersteuerung verhindern
@@ -146,6 +173,8 @@ settings-romanization-desc = Schreibt Japanisch, Koreanisch, Chinesisch, Kyrilli
 settings-translation = Übersetzung
 settings-translation-desc = Übersetzungen stammen von Unison oder ersatzweise von Google. Mitgelieferte Übersetzungen haben Vorrang.
 settings-translate-into = Übersetzen in
+settings-lyrics-look = Liedtextstil
+settings-lyrics-look-desc = Der Liedtext eines anderen Themes, etwa der von Spicy, während der Rest der App bei deinem bleibt.
 settings-text-size = Textgröße
 settings-text-size-desc = Vergrößert oder verkleinert den Liedtext ausgehend von der Größe des Designs.
 settings-larger = Größer
@@ -215,6 +244,8 @@ settings-flat-background-desc = Eine Farbe hinter den Seiten und „Jetzt läuft
 settings-flat-background-colour = Hintergrundfarbe
 settings-frosted-glass = Milchglas
 settings-frosted-glass-desc = In Designs mit diesem Effekt wird der Hintergrund von Menüs und schwebenden Leisten weichgezeichnet. Ausgeschaltet sind sie etwas undurchsichtiger.
+settings-classic-title-bar = Klassische Titelleiste
+settings-classic-title-bar-desc = Die Fensterschaltflächen wie vor 2.0.2: eckig oben rechts, statt in einer Aussparung. Die Schaltflächen der aktuellen Wiedergabe und die Kontoschaltfläche liegen wieder daneben.
 settings-pulse-with-the-music = Im Takt pulsieren
 settings-pulse-with-the-music-desc = In Designs mit bewegtem Hintergrund dehnt er sich im Takt der Musik aus.
 settings-visualizer = Visualizer
@@ -241,9 +272,20 @@ settings-pill-mini-player-desc = Experimentell. Zeigt die Bedienelemente an, wen
 settings-pill-mini-player-desc-needs-opengl = Experimentell. Zeigt die Bedienelemente an, wenn du auf die kleine Kapsel zeigst. Benötigt OpenGL.
 settings-mini-player = Miniplayer
 settings-pill-mini-player = Kapselförmiger Miniplayer
+settings-mini-autohide = Steuerung automatisch ausblenden
+settings-mini-autohide-desc = Im Liedtextmodus gleiten die obere Leiste und die Steuerung weg, und nur der Liedtext bleibt. Sie kommen zurück, wenn du auf den Miniplayer zeigst.
+settings-mini-pill-extended = Kapsel im Liedtextmodus ausgeklappt lassen
+settings-mini-pill-extended-desc = Der Miniplayer bleibt auf der Breite beim Daraufzeigen, solange der Liedtext zu sehen ist, und die Zeile hat mehr Platz. Daraufzeigen zeigt weiter die Steuerung.
+settings-mini-cover-bg = Hintergrund mit dem Cover
+settings-mini-cover-bg-desc = Das Cover des Titels füllt die Karte des Miniplayers, abgedunkelt hinter Liedtext und Steuerung.
+settings-mini-cover-blur = Weichzeichner des Covers
+settings-mini-cover-opacity = Deckkraft des Covers
 settings-keep-on-top = Immer im Vordergrund
 settings-keep-on-top-desc = Der Miniplayer bleibt vor anderen Fenstern.
 settings-pill-mini-player-restart-desc = Der Stil des Miniplayers ändert sich beim nächsten Start.
+settings-keep-on-top-wayland = Immer im Vordergrund unter Wayland
+settings-keep-on-top-wayland-desc = Wayland lässt Apps ihr Fenster nicht über anderen halten, deshalb öffnet sich die App über XWayland. Dort rollt das Touchpad nicht nach, und Text kann bei gebrochener Skalierung weicher aussehen.
+settings-keep-on-top-wayland-restart-desc = Das Fenster ändert sich beim nächsten Start.
 
 ## App icon
 
@@ -253,6 +295,14 @@ settings-app-icon = App-Symbol
 settings-preview = Vorschau
 settings-preview-desc = So sieht das Symbol in der Taskleiste und im Infobereich aus.
 settings-app-icon-named = App-Symbol: { $name }
+settings-app-icon-classic = Klassisch
+settings-app-icon-smile-ring = Lächelnder Ring
+settings-app-icon-rust-gear = Rust-Zahnrad
+settings-app-icon-waveform = Wellenform
+settings-app-icon-record = Schallplatte
+settings-app-icon-lit-line = Leuchtlinie
+settings-app-icon-duet = Duett
+settings-app-icon-warp = Warp
 
 ## Connections
 
@@ -260,6 +310,7 @@ settings-stream-deck = Stream Deck
 settings-stream-deck-desc = Erlaubt einem Stream-Deck-Plug-in auf diesem Computer, die Wiedergabe zu steuern.
 settings-lastfm-connected = Deine Wiedergaben werden an das Profil von { $name } gescrobbelt.
 settings-lastfm-allow = Erlaube ytm-rs den Zugriff auf der Last.fm-Seite, die sich im Browser geöffnet hat.
+settings-lastfm-not-allowed = Der Zugriff wurde auf Last.fm nicht rechtzeitig erlaubt
 settings-lastfm-desc = Scrobbelt deine Wiedergaben an dein Last.fm-Profil.
 settings-disconnect = Verbindung trennen
 settings-connect = Verbinden
@@ -268,6 +319,8 @@ settings-listenbrainz-desc = Sendet deine Wiedergaben an dein ListenBrainz-Profi
 settings-user-token = Benutzertoken
 settings-listenbrainz-token-hint = ListenBrainz-Benutzertoken einfügen
 settings-listenbrainz-token-link = Token auf listenbrainz.org abrufen
+settings-listenbrainz-token-missing = füge zuerst dein Benutzertoken ein
+settings-listenbrainz-token-refused = ListenBrainz hat dieses Token nicht akzeptiert
 
 ## Language
 
@@ -277,7 +330,14 @@ settings-language = Sprache
 settings-language-desc = Sprache der App-Oberfläche. Titel, Namen und Inhaltsbereiche von YouTube Music verwenden die unten gewählte Sprache der Songinformationen.
 settings-restart-to-apply = Zum Übernehmen neu starten
 settings-language-restart-desc = Die Sprache ändert sich beim nächsten Start.
-settings-restart-now = Jetzt neu starten
+
+## Song info: the language and country YouTube Music answers in. Separate from Language above.
+
+settings-song-info = Songinformationen
+settings-song-info-language = Sprache der Songinformationen
+settings-song-info-language-desc = Sprache für Songtitel, Künstler- und Albumnamen und Inhaltsbereiche von YouTube Music, soweit Übersetzungen verfügbar sind.
+settings-song-info-country = Land für Charts und Empfehlungen
+settings-song-info-country-desc = Das Land, für das Charts und Empfehlungen angezeigt werden.
 
 ## Window
 
@@ -288,6 +348,10 @@ settings-home = Startseite
 settings-close-to-tray-desc-linux = Behält ein Symbol im Infobereich. × blendet das Fenster aus, während die Musik weiterspielt. Über das Symbolmenü kannst du es anzeigen, ausblenden oder die App beenden. Ein Klick auf den Titel in der Mediensteuerung zeigt es ebenfalls an. Strg+Q beendet die App.
 settings-close-to-tray-desc = Behält ein Symbol im Infobereich. × blendet das Fenster aus, während die Musik weiterspielt. Klicke auf das Symbol zum Anzeigen oder mit der rechten Maustaste, um es aus- oder einzublenden oder die App zu beenden.
 settings-close-to-tray = In den Infobereich schließen
+settings-tray-click-plays = Klick auf das Symbol spielt ab oder pausiert
+settings-tray-click-plays-desc = Ein Klick auf das Symbol startet oder pausiert die Wiedergabe kurz darauf, statt das Fenster anzuzeigen. Ein Doppelklick zeigt es an, ebenso ein Klick, wenn nichts zum Abspielen da ist.
+settings-tray-no-gtk = Das Symbol im Infobereich braucht GTK, das nicht gestartet werden konnte ({ $error }).
+settings-tray-no-appindicator = Das Symbol im Infobereich braucht die AppIndicator-Bibliothek, die nicht installiert ist: libayatana-appindicator3-1 unter Debian und Ubuntu, libayatana-appindicator-gtk3 unter Fedora (unter Bazzite, Silverblue und anderen atomaren Systemen: rpm-ostree install libayatana-appindicator-gtk3, dann den Computer neu starten), libayatana-appindicator unter Arch.
 settings-song-notifications-desc = Meldet Titel, Interpret und Cover des neuen Songs, wenn das Fenster minimiert, im Infobereich oder hinter anderen Fenstern ist.
 settings-song-notifications-unavailable = Erfordert die installierte App. Windows zeigt nur Benachrichtigungen von Apps im Startmenü.
 settings-song-notifications = Titelbenachrichtigungen
@@ -307,11 +371,36 @@ settings-downloads-note = Lade Titel aus ihrem Menü oder ganze Alben und Playli
 settings-download-folder = Downloadordner
 settings-change = Ändern
 settings-open = Öffnen
+settings-download-liked = Titel mit „Gefällt mir“ herunterladen
+settings-download-liked-desc = Songs, die dir gefallen, werden sofort heruntergeladen. Beim Einschalten und bei jedem Start der App auch alle, die noch fehlen. Nur angemeldet; etwa 4 MB pro Song.
+settings-folder-per-list = Alben und Playlists in eigenen Ordnern speichern
+settings-folder-per-list-desc = Beim Herunterladen eines Albums oder einer Playlist über die Seite oder das Menü werden die Songs in einem gleichnamigen Ordner gespeichert. Bereits heruntergeladene Songs bleiben an ihrem bisherigen Ort.
+settings-file-lyrics = Liedtext in der Datei
+settings-file-lyrics-desc = Heruntergeladene Titel enthalten den Liedtext, den du dazu siehst, für andere Musikplayer. Synchrone Liedtexte werden als LRC gespeichert.
+settings-file-lyrics-synced = Synchron
+settings-file-lyrics-plain = Nur Text
+settings-file-lyrics-off = Keiner
 
 ## Network
 
 settings-network = Netzwerk
+settings-backup-stream = Ersatzstream bei Wiedergabeabbrüchen
+settings-backup-stream-desc = Wenn du angemeldet bist und YouTube einen Song wegen einer Bot-Prüfung stoppt (etwa bei einer VPN-Verbindung), wird ein Stream mit Video verwendet. Verbraucht mehr Daten.
+settings-local-network = Lautsprecher im Netzwerk suchen
+settings-local-network-desc = Sucht AirPlay-Lautsprecher im Netzwerk, damit die Musik dort wiedergegeben werden kann. Die Firewall fragt vielleicht einmal, ob die App durchgelassen werden darf.
+settings-local-network-hint = Die Firewall fragt vielleicht, ob die App durchgelassen werden darf
+settings-airplay-searching = Suche nach Lautsprechern…
+settings-speakers-searching-more = Suche nach weiteren…
+settings-speakers-none = Keine Lautsprecher gefunden
+settings-backup-stream-prompt-title = Wiedergabe angehalten
+settings-backup-stream-prompt-body = YouTube hat diesen Song wegen einer Bot-Prüfung angehalten. Das kann bei einer VPN-Verbindung passieren. Ein Ersatzstream ermöglicht die Wiedergabe. Er enthält auch das Video und verbraucht mehr Daten.
+settings-backup-stream-prompt-enable = Aktivieren und erneut versuchen
+settings-backup-stream-prompt-settings = Einstellungen
+settings-backup-stream-prompt-dismiss = Jetzt nicht
 settings-proxy = Proxy
+settings-proxy-use-system = Windows-Einstellungen verwenden
+settings-proxy-use-system-system = Systemeinstellungen verwenden
+settings-proxy-off = Kein Proxy
 settings-proxy-desc = Leitet den gesamten Datenverkehr von ytm-rs über einen Proxy, einschließlich Titeln, Liedtexten, Anmeldung und gemeinsamem Hören.
 settings-proxy-windows-uses = Windows verwendet { $proxy }.
 settings-proxy-windows-none = In Windows ist kein Proxy eingerichtet. ytm-rs verbindet sich direkt.
@@ -324,17 +413,29 @@ settings-address = Adresse
 settings-saved = Gespeichert
 settings-save = Speichern
 settings-proxy-password-note = Ein in der Adresse enthaltenes Passwort wird in der Windows-Anmeldeinformationsverwaltung gespeichert.
+settings-proxy-password-note-system = Ein Passwort in der Adresse liegt im Schlüsselbund des Systems oder, wenn der nicht benutzt werden kann, in einer Datei, die nur du lesen kannst.
 settings-checking = Wird geprüft…
 settings-proxy-test-desc = Prüft, ob YouTube Music mit dieser Einstellung antwortet.
 settings-test-connection = Verbindung testen
 settings-test = Testen
 settings-test-working = Verbindung hergestellt. YouTube Music antwortete in { $ms } ms.
 settings-test-failed = Keine Verbindung: { $error }
+settings-proxy-not-an-address = das ist keine Proxyadresse, etwa http://127.0.0.1:8080
+settings-proxy-scheme = verwende eine Adresse mit http:// oder socks5://
+settings-proxy-no-host = die Adresse braucht einen Host
+settings-proxy-no-port = die Adresse braucht einen Port, etwa :8080
+settings-proxy-not-answering = unter { $address } antwortet nichts. Läuft der Proxy?
+settings-proxy-timed-out = der Proxy hat nicht rechtzeitig geantwortet.
+settings-proxy-sign-in-refused = der Proxy hat den Benutzernamen oder das Passwort nicht akzeptiert.
+settings-proxy-not-found = die Adresse dieses Proxys wurde nicht gefunden.
 settings-proxy-restart-desc = Die neue Proxy-Einstellung gilt beim nächsten Start.
 
 ## Storage
 
 settings-cache-cleared = Cache geleert. { $size } freigegeben.
+settings-size-mb = { $size } MB
+settings-size-gb = { $size } GB
+settings-size-under-mb = Weniger als 1 MB
 settings-storage = Speicher
 settings-clearing = Wird geleert…
 settings-measuring = Wird berechnet…
@@ -348,6 +449,7 @@ settings-space = Leertaste
 settings-next-previous-song = Nächster / vorheriger Titel
 settings-ctrl = Strg
 settings-volume-up-down = Lauter / leiser
+settings-shortcut-seek = Im Titel 5 Sekunden zurück / vorspulen
 settings-shortcut-command-palette = Befehlspalette für Seiten, Einstellungen, Playlists und Aktionen
 settings-search = Suchen
 settings-shortcut-find-in-list = In einer Titelliste suchen
@@ -394,6 +496,8 @@ settings-download = Herunterladen
 settings-check-now = Jetzt prüfen
 settings-another-copy = Weitere Installation
 settings-another-copy-desc = ytm-rs wurde auch über { $kind } installiert. Befehl zum Entfernen dieser Installation: { $cmd }
+settings-another-copy-deb = das .deb-Paket
+settings-another-copy-arch = das Arch-Paket
 settings-whats-new = Neuerungen
 settings-whats-new-in = Neu in { $version }
 
@@ -412,26 +516,3 @@ settings-downloads-and-counting = { $count ->
    *[other] Schon { $shown } Downloads
 }
 settings-counting-downloads = Downloads werden gezählt…
-settings-fade-when-pausing = Sanftes Ausblenden beim Pausieren
-settings-fade-when-pausing-desc = Blendet die Musik beim Pausieren innerhalb von 0,2 Sekunden aus und beim Fortsetzen wieder ein. Ausgeschaltet stoppt und startet sie sofort.
-settings-song-info = Songinformationen
-settings-song-info-language = Sprache der Songinformationen
-settings-song-info-language-desc = Sprache für Songtitel, Künstler- und Albumnamen und Inhaltsbereiche von YouTube Music, soweit Übersetzungen verfügbar sind.
-settings-song-info-country = Land für Charts und Empfehlungen
-settings-song-info-country-desc = Das Land, für das Charts und Empfehlungen angezeigt werden.
-settings-download-liked = Titel mit „Gefällt mir“ herunterladen
-settings-download-liked-desc = Songs, die dir gefallen, werden sofort heruntergeladen. Beim Einschalten und bei jedem Start der App auch alle, die noch fehlen. Nur angemeldet; etwa 4 MB pro Song.
-settings-folder-per-list = Alben und Playlists in eigenen Ordnern speichern
-settings-folder-per-list-desc = Beim Herunterladen eines Albums oder einer Playlist über die Seite oder das Menü werden die Songs in einem gleichnamigen Ordner gespeichert. Bereits heruntergeladene Songs bleiben an ihrem bisherigen Ort.
-settings-file-lyrics = Liedtext in der Datei
-settings-file-lyrics-desc = Heruntergeladene Titel enthalten den Liedtext, den du dazu siehst, für andere Musikplayer. Synchrone Liedtexte werden als LRC gespeichert.
-settings-file-lyrics-synced = Synchron
-settings-file-lyrics-plain = Nur Text
-settings-file-lyrics-off = Keiner
-settings-backup-stream = Ersatzstream bei Wiedergabeabbrüchen
-settings-backup-stream-desc = Wenn du angemeldet bist und YouTube einen Song wegen einer Bot-Prüfung stoppt (etwa bei einer VPN-Verbindung), wird ein Stream mit Video verwendet. Verbraucht mehr Daten.
-settings-backup-stream-prompt-title = Wiedergabe angehalten
-settings-backup-stream-prompt-body = YouTube hat diesen Song wegen einer Bot-Prüfung angehalten. Das kann bei einer VPN-Verbindung passieren. Ein Ersatzstream ermöglicht die Wiedergabe. Er enthält auch das Video und verbraucht mehr Daten.
-settings-backup-stream-prompt-enable = Aktivieren und erneut versuchen
-settings-backup-stream-prompt-settings = Einstellungen
-settings-backup-stream-prompt-dismiss = Jetzt nicht

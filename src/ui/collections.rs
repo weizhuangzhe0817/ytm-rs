@@ -5,11 +5,12 @@ use std::collections::HashSet;
 
 use crate::backend::{Collection, Req};
 use crate::model::{Card, ShelfKind, Target, Track};
+use crate::ytm::Duplicates;
 
 use super::lists::{Arrival, Done, LIBRARY_SONGS, LIKED_MUSIC, Opened, Start};
 use super::pages::thousands;
 use super::queue::QueueFill;
-use super::App;
+use super::{App, Dialog};
 
 impl App {
     /// What the queue was started from, while the song playing is one of it: what kind
@@ -68,12 +69,41 @@ impl App {
     }
 
     /// Add songs to one of the account's playlists. They show in it at once, even while
-    /// YouTube Music goes on listing it without them.
-    pub(super) fn add_to_playlist(&mut self, playlist_id: String, tracks: &[Track]) {
+    /// YouTube Music goes on listing it without them. With [`Duplicates::Ask`], YouTube
+    /// Music adds none if it has some already, and the listener is asked (issue #339).
+    pub(super) fn add_to_playlist(&mut self, playlist_id: String, tracks: &[Track], duplicates: Duplicates) {
         self.lists.added(&playlist_id, tracks);
         self.sync_card_count(&playlist_id);
-        let video_ids = tracks.iter().map(|t| t.id.clone()).collect();
-        self.backend.request(Req::AddToPlaylist { playlist_id, video_ids });
+        // Kept downloaded: they're downloaded at once, as liked songs are.
+        self.download_kept(&playlist_id, tracks);
+        self.backend.request(Req::AddToPlaylist { playlist_id, tracks: tracks.to_vec(), duplicates });
+    }
+
+    /// YouTube Music added none of `tracks`, as some are in the playlist already: out of
+    /// it here again, and the listener chooses.
+    pub(super) fn already_in_playlist(&mut self, playlist_id: String, tracks: Vec<Track>) {
+        let video_ids: Vec<String> = tracks.iter().map(|t| t.id.clone()).collect();
+        self.lists.add_failed(&playlist_id, &video_ids);
+        self.sync_card_count(&playlist_id);
+        // Which ones: one song is that song; of more, the ones a playlist kept whole here
+        // lists (it may be out of date, so none found names none).
+        let duplicates: Vec<String> = match (&tracks[..], self.lists.get(&playlist_id).filter(|o| o.complete)) {
+            ([t], _) => vec![t.title.clone()],
+            (_, Some(o)) => tracks.iter().filter(|t| o.c.tracks.iter().any(|s| s.id == t.id)).map(|t| t.title.clone()).collect(),
+            (_, None) => Vec::new(),
+        };
+        let cards = self.library.as_ref().map(|l| l.playlists.as_slice()).or(self.sidebar_cache.as_deref()).unwrap_or_default();
+        let playlist_title = cards
+            .iter()
+            .find(|c| matches!(&c.target, Target::Playlist(p) if *p == playlist_id))
+            .map(|c| c.title.clone())
+            .or_else(|| self.lists.get(&playlist_id).map(|o| o.c.title.clone()))
+            .unwrap_or_default();
+        // Another dialog opened meanwhile stays; the answer is a toast instead.
+        match self.dialog {
+            None => self.dialog = Some(Dialog::ConfirmAddDuplicates { playlist_id, playlist_title, tracks, duplicates }),
+            Some(_) => self.toast(crate::tr!("status-not-added-duplicates", title = playlist_title.as_str(), count = tracks.len())),
+        }
     }
 
     /// The sidebar's and Library's playlist cards ("Suko • 4 tracks") count what YouTube
@@ -118,7 +148,7 @@ impl App {
     pub(super) fn set_liked(&mut self, tracks: &[Track], like: bool) {
         log::debug!("like={like}: {} songs, e.g. {:?}", tracks.len(), tracks.iter().take(3).map(|t| &t.id).collect::<Vec<_>>());
         if like {
-            self.download_liked(tracks);
+            self.download_kept(LIKED_MUSIC, tracks);
         }
         for t in tracks {
             if like {
@@ -209,7 +239,7 @@ impl App {
     /// failed before anything came leaves its page with the retry.
     fn load_done(&mut self, id: &str, done: Done) {
         match done {
-            Done::Kept if id == LIKED_MUSIC => self.download_all_liked(),
+            Done::Kept if self.keeps_downloaded(id) => self.download_all_kept(id),
             Done::Kept => {}
             Done::Reload(s) => self.start_load(s),
             Done::NotKept => {
@@ -224,32 +254,75 @@ impl App {
         }
     }
 
-    /// Settings › Downloads › Download liked songs: Liked Music's songs not downloaded yet,
-    /// once all of it is in (it loads at launch and sign-in; otherwise it's asked for).
-    pub(super) fn download_all_liked(&mut self) {
-        match self.lists.get(LIKED_MUSIC).filter(|_| !self.receiving(LIKED_MUSIC)) {
-            Some(o) => {
-                let tracks = o.c.tracks.clone();
-                self.download_liked(&tracks);
+    /// Whether playlist `id` is kept downloaded: Liked Music by Settings › Downloads ›
+    /// Download liked songs, any other by its page's More › Keep downloaded.
+    pub(super) fn keeps_downloaded(&self, id: &str) -> bool {
+        self.logged_in && if id == LIKED_MUSIC { self.download_liked } else { self.kept_downloaded.iter().any(|k| k == id) }
+    }
+
+    /// Keep playlist `id` downloaded, or stop: its songs not downloaded yet go now, and
+    /// each time it loads (at launch, and when it's opened or changed), those that joined
+    /// it since. Stopping keeps what's downloaded.
+    pub(super) fn keep_downloaded(&mut self, id: &str, on: bool) {
+        if id == LIKED_MUSIC {
+            self.download_liked = on;
+        } else {
+            self.kept_downloaded.retain(|k| k != id);
+            if on {
+                self.kept_downloaded.push(id.to_owned());
             }
-            None => self.request_liked(false),
+        }
+        if on {
+            self.download_all_kept(id);
+        }
+        self.toast(if on { crate::tr!("status-kept-downloaded") } else { crate::tr!("status-not-kept-downloaded") });
+    }
+
+    /// The playlists kept downloaded other than Liked Music (which loads anyway), loaded at
+    /// launch for the songs that joined them elsewhere. Signed out, none.
+    pub(super) fn load_kept_downloaded(&mut self) {
+        if !self.logged_in {
+            return;
+        }
+        for id in self.kept_downloaded.clone() {
+            self.load_list(&id, false, false);
         }
     }
 
-    /// Download `tracks`, just liked or all of Liked Music, as Liked Music's run: those not
-    /// downloaded yet and not queued for this since launch.
-    fn download_liked(&mut self, tracks: &[Track]) {
-        if !self.download_liked || !self.logged_in {
+    /// A list kept downloaded: its songs not downloaded yet, once all of it is in (asked
+    /// for when it isn't).
+    pub(super) fn download_all_kept(&mut self, id: &str) {
+        match self.lists.get(id).filter(|_| !self.receiving(id)) {
+            Some(o) => {
+                let tracks = o.c.tracks.clone();
+                self.download_kept(id, &tracks);
+            }
+            None if id == LIKED_MUSIC => self.request_liked(false),
+            None => self.load_list(id, false, false),
+        }
+    }
+
+    /// Download `tracks` of the list `id` kept downloaded (just liked, or all of it) as its
+    /// run: those not downloaded yet and not queued for it since launch.
+    fn download_kept(&mut self, id: &str, tracks: &[Track]) {
+        if !self.keeps_downloaded(id) {
             return;
         }
-        let todo: Vec<Track> = crate::downloads::not_listed(tracks).into_iter().filter(|t| self.liked_queued.insert(t.id.clone())).collect();
+        let todo: Vec<Track> = crate::downloads::not_listed(tracks).into_iter().filter(|t| self.kept_queued.insert((id.to_owned(), t.id.clone()))).collect();
         if todo.is_empty() {
             return;
         }
         // Its own title, as when it's downloaded from its page: the same folder, with that setting on.
-        let title = self.lists.get(LIKED_MUSIC).map_or_else(|| crate::tr!("nav-liked-songs").to_owned(), |o| o.c.title.clone());
-        log::info!("download liked songs: {} to download", todo.len());
-        self.backend.request(Req::DownloadMany { target: Some(Target::Playlist(LIKED_MUSIC.to_owned())), title, tracks: Some(todo), confirmed: true });
+        let title = match self.lists.get(id) {
+            Some(o) => o.c.title.clone(),
+            None if id == LIKED_MUSIC => crate::tr!("nav-liked-songs").to_owned(),
+            None => String::new(),
+        };
+        log::info!("download {id}, kept downloaded: {} to download", todo.len());
+        // Another playlist asks first when it's a large download, as from its page; the few
+        // songs that join it later don't. Liked Music's setting is the asking.
+        let confirmed = id == LIKED_MUSIC;
+        self.backend.request(Req::DownloadMany { target: Some(Target::Playlist(id.to_owned())), title, tracks: Some(todo), confirmed });
     }
 
     /// The kept albums and playlists not to drop for room: the page on screen and what's playing.

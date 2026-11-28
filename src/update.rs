@@ -11,7 +11,9 @@
 //! place of its own as it closes. A copy from the Linux .deb (a `deb.txt` beside the
 //! binary, in /usr/lib/ytm-rs) can't replace itself: it only says a new version is out
 //! ([`State::Available`]), and the new .deb installs over it. The Arch package (a
-//! `pacman.txt` there instead) does the same with the new package. A Flatpak (which
+//! `pacman.txt` there instead) does the same with the new package. The AppImage (an
+//! `appimage.txt` beside the binary inside it) downloads the new AppImage and puts it in
+//! place of the file it was started from (`$APPIMAGE`) as it closes. A Flatpak (which
 //! always has `/.flatpak-info`) only says so too, and is updated through Flatpak. Every platform has a portable build too (a
 //! `portable.txt` marker; inside the app bundle on macOS), which updates from the
 //! portable download. Dev builds never update themselves.
@@ -28,11 +30,13 @@
 //! finds, and any other on request ([`Updater::notes`]), for the update dialog, the
 //! card shown after updating and Settings.
 //!
-//! Two channels: stable follows the latest published release; nightly also takes the
-//! prereleases built from main every night there are new changes (tagged
-//! `v<version>-nightly.<date>`, see the release workflow), whichever is newer. A nightly
-//! build knows it is one from `YTM_NIGHTLY`, set when it was built. Switching back to
-//! stable from a nightly installs the latest stable release, though its version is lower.
+//! Two channels, both picked from the list of releases: stable takes the newest
+//! published release; nightly also takes the prereleases built from main every night
+//! there are new changes (tagged `v<version>-nightly.<date>`, named after the version
+//! they lead up to; see .github/scripts/nightly-version.sh), whichever is newer. A
+//! nightly build knows its version from `YTM_VERSION`, set when it was built. Switching
+//! back to stable from a nightly installs the latest stable release, though its version
+//! is lower.
 //!
 //! Dev hooks: `YTM_UPDATE_FORCE=1` treats any build as installed; `YTM_UPDATE_AS=<ver>`
 //! pretends to be that version; `YTM_UPDATE_FLATPAK=1` (Linux) acts as a Flatpak;
@@ -55,7 +59,6 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
 
-const LATEST: &str = "https://api.github.com/repos/grapedjuice/ytm-rs/releases/latest";
 const ALL_RELEASES: &str = "https://api.github.com/repos/grapedjuice/ytm-rs/releases";
 const BY_TAG: &str = "https://api.github.com/repos/grapedjuice/ytm-rs/releases/tags/v";
 pub const RELEASES: &str = "https://github.com/grapedjuice/ytm-rs/releases";
@@ -104,12 +107,11 @@ pub struct Updater {
 /// What a nightly's version has between the base version and its build number.
 const NIGHTLY: &str = "-nightly.";
 
-/// The version this was built as: a nightly build adds its build number.
+/// The version this was built as: the release workflow's (`YTM_VERSION`), which for a
+/// nightly is the version it leads up to with its build number
+/// (`0.4.1-nightly.20261126` from Cargo.toml's 0.4.0), or Cargo.toml's.
 pub fn build_version() -> String {
-    match option_env!("YTM_NIGHTLY").filter(|n| !n.is_empty()) {
-        Some(n) => format!("{}{NIGHTLY}{n}", env!("CARGO_PKG_VERSION")),
-        None => env!("CARGO_PKG_VERSION").to_owned(),
-    }
+    option_env!("YTM_VERSION").filter(|v| !v.is_empty()).unwrap_or(env!("CARGO_PKG_VERSION")).to_owned()
 }
 
 pub fn current_version() -> String {
@@ -132,6 +134,9 @@ pub fn installed() -> bool {
     if cfg!(target_os = "macos") {
         return bundle_of(&exe).is_some() && portable_dir().is_none();
     }
+    if appimage_file().is_some() {
+        return true;
+    }
     let marker = if cfg!(windows) { "unins000.exe" } else { "install.txt" };
     exe.parent().is_some_and(|d| d.join(marker).exists())
 }
@@ -151,6 +156,44 @@ pub fn pacman() -> bool {
     *PACMAN.get_or_init(|| cfg!(target_os = "linux") && std::env::current_exe().ok().and_then(|e| Some(e.parent()?.join("pacman.txt").exists())).unwrap_or(false))
 }
 
+/// Whether this copy runs from the AppImage, which marks it with `appimage.txt` beside
+/// the binary inside it.
+pub fn appimage() -> bool {
+    static APPIMAGE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *APPIMAGE.get_or_init(|| cfg!(target_os = "linux") && std::env::current_exe().ok().and_then(|e| Some(e.parent()?.join("appimage.txt").exists())).unwrap_or(false))
+}
+
+/// The AppImage file this copy was started from, which an update replaces: the binary
+/// itself sits in the image, mounted read-only while it runs. Its runtime says where it
+/// is in `APPIMAGE`. Without that (started from an unpacked image), or where it can't
+/// replace the file (someone else's, or in a folder it can't write to, such as /opt),
+/// it only says a new version is out, as the .deb does.
+pub fn appimage_file() -> Option<PathBuf> {
+    static FILE: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+    FILE.get_or_init(|| {
+        let file = appimage().then(|| std::env::var_os("APPIMAGE").map(PathBuf::from)).flatten()?;
+        (file.is_absolute() && file.is_file() && replaceable(&file)).then_some(file)
+    })
+    .clone()
+}
+
+/// Whether this user can put a new file in `file`'s place: it's theirs (which a folder
+/// like /tmp also asks), in a folder they can write to.
+#[cfg(unix)]
+fn replaceable(file: &Path) -> bool {
+    use std::os::unix::{ffi::OsStrExt, fs::MetadataExt};
+    // SAFETY: no arguments, can't fail.
+    let mine = std::fs::symlink_metadata(file).is_ok_and(|m| m.uid() == unsafe { libc::geteuid() });
+    let Some(Ok(dir)) = file.parent().map(|d| std::ffi::CString::new(d.as_os_str().as_bytes())) else { return false };
+    // SAFETY: a NUL-terminated path that outlives the call.
+    mine && unsafe { libc::access(dir.as_ptr(), libc::W_OK | libc::X_OK) == 0 }
+}
+
+#[cfg(not(unix))]
+fn replaceable(_: &Path) -> bool {
+    false
+}
+
 /// Whether this copy runs as a Flatpak. Flatpak owns it, so like the .deb it never
 /// replaces itself, and there's no package to download either: Flatpak updates it.
 pub fn flatpak() -> bool {
@@ -165,10 +208,10 @@ fn in_flatpak(info: &Path, pretend: bool) -> bool {
     pretend || info.is_file()
 }
 
-/// Whether a package manager owns this copy (the .deb, the Arch package or a Flatpak):
-/// it only says a new version is out.
+/// Whether a package manager owns this copy (the .deb, the Arch package or a Flatpak),
+/// or it's an AppImage with no file to replace: it only says a new version is out.
 pub fn packaged() -> bool {
-    flatpak() || deb() || pacman()
+    flatpak() || deb() || pacman() || (appimage() && appimage_file().is_none())
 }
 
 /// What to do with the new version, for a copy a package manager owns. A Flatpak
@@ -178,6 +221,8 @@ pub fn package_step() -> &'static str {
         crate::tr!("window-package-flatpak")
     } else if pacman() {
         crate::tr!("window-package-instructions")
+    } else if appimage() {
+        crate::tr!("window-package-appimage")
     } else {
         crate::tr!("window-package-download")
     }
@@ -188,7 +233,8 @@ pub fn package_step() -> &'static str {
 /// behind: the menu and the `ytm-rs` command open the install.sh one. What it's from,
 /// and the command that removes it.
 pub fn other_copy() -> Option<(&'static str, &'static str)> {
-    if !cfg!(target_os = "linux") {
+    // An AppImage is a file of its own, beside whatever else is installed.
+    if !cfg!(target_os = "linux") || appimage() {
         return None;
     }
     let home = std::env::var_os("HOME").map(PathBuf::from)?;
@@ -197,21 +243,22 @@ pub fn other_copy() -> Option<(&'static str, &'static str)> {
     } else if !installed() {
         None
     } else if Path::new("/usr/lib/ytm-rs/deb.txt").exists() {
-        Some(("the .deb", "sudo apt remove ytm-rs"))
+        Some((crate::tr!("settings-another-copy-deb"), "sudo apt remove ytm-rs"))
     } else {
-        Path::new("/usr/lib/ytm-rs/pacman.txt").exists().then_some(("the Arch package", "sudo pacman -R ytm-rs"))
+        Path::new("/usr/lib/ytm-rs/pacman.txt").exists().then(|| (crate::tr!("settings-another-copy-arch"), "sudo pacman -R ytm-rs"))
     }
 }
 
-/// A version as the .deb has it: a nightly (`0.3.0-nightly.20261111`) comes after its
-/// version there too (`0.3.0+nightly.20261111`).
+/// A version as the .deb's file name has it: a nightly (`0.4.1-nightly.20261126`) as
+/// `0.4.1+nightly.20261126`, the name copies before 0.4.1 look for. Inside, linux/deb.sh
+/// gives the package `0.4.1~nightly.20261126`, which dpkg puts before 0.4.1.
 pub fn deb_version(version: &str) -> String {
     version.replacen(NIGHTLY, "+nightly.", 1)
 }
 
-/// The Arch package's file, as linux/arch.sh builds it: pkgver can't have a hyphen, so
-/// a nightly (`0.3.0-nightly.20261111`) is `0.3.0.nightly.20261111`, which pacman puts
-/// after its version too.
+/// The Arch package's file, as linux/arch.sh names it: a nightly
+/// (`0.4.1-nightly.20261126`) as `0.4.1.nightly.20261126`, the name copies before 0.4.1
+/// look for. Inside, its pkgver is `0.4.1nightly.20261126`, which pacman puts before 0.4.1.
 fn pacman_package(version: &str, arch: &str) -> String {
     format!("ytm-rs-{}-1-{arch}.pkg.tar.zst", version.replace('-', "."))
 }
@@ -227,6 +274,9 @@ fn asset_name(version: &str) -> String {
     let arch = std::env::consts::ARCH;
     if cfg!(target_os = "linux") && pacman() {
         return pacman_package(version, arch);
+    }
+    if cfg!(target_os = "linux") && appimage() {
+        return format!("ytm-rs-{version}-linux-{arch}.AppImage");
     }
     if cfg!(target_os = "linux") && deb() {
         let arch = if arch == "x86_64" { "amd64" } else if arch == "aarch64" { "arm64" } else { arch };
@@ -288,13 +338,18 @@ pub fn wait_for_predecessor() {
 /// Start `exe` once this process has exited: it waits for this one
 /// ([`wait_for_predecessor`]), so this process can take as long as it needs to close.
 pub fn start_after_exit(exe: &Path) -> bool {
+    start_after_exit_with_args(exe, &[])
+}
+
+/// Start again with extra arguments, after this process exits.
+pub fn start_after_exit_with_args(exe: &Path, args: &[&str]) -> bool {
     let after = format!("{AFTER_FLAG}{}", std::process::id());
     #[cfg(target_os = "macos")]
     if let Some(app) = bundle_of(exe) {
         // Through Launch Services; `-n` starts a new copy while this one is still up.
-        return spawn(Command::new("open").arg("-n").arg(app).arg("--args").arg(&after));
+        return spawn(Command::new("open").arg("-n").arg(app).arg("--args").arg(&after).args(args));
     }
-    spawn(Command::new(exe).arg(after))
+    spawn(Command::new(exe).arg(after).args(args))
 }
 
 /// Wait for process `pid` to exit, however long it takes: going ahead early would run
@@ -392,15 +447,27 @@ fn spawn(cmd: &mut Command) -> bool {
 }
 
 /// `a` is newer than `b` (dotted numeric versions, a leading "v" ignored). A nightly
-/// (`0.2.34-nightly.20261110`) is built from main after that version's release, so it's
-/// newer than the release and older than the next one.
+/// (`0.4.1-nightly.20261126`) is named after the version it leads up to, so it's older
+/// than that release and newer than any lower version; nightlies of a version go by
+/// build. Nightlies before 0.4.1 were named after the release before them
+/// (`0.4.0-nightly.20261125`, built after 0.4.0), so they count as before it now:
+/// only copies from before this run them, and they go on to the newer names
+/// (`0.4.1-nightly.*` is newer than them by the old order too).
+///
+/// 2.0.x was a joke between 0.3.4 and 0.4.0, so it counts as 0.3.4.x: 2.0.2
+/// and the 2.0.3 that brings it back go on to 0.4.0, and nothing goes back to them.
+/// A real 2.0 would have to skip to 2.1.
 pub fn newer(a: &str, b: &str) -> bool {
     let nums = |s: &str| s.split('.').map(|p| p.parse::<u64>().unwrap_or(0)).collect::<Vec<_>>();
+    let base = |s: &str| match nums(s).as_slice() {
+        [2, 0, rest @ ..] => [0, 3, 4].iter().chain(rest).copied().collect(),
+        n => n.to_vec(),
+    };
     let parse = |v: &str| {
         let v = v.trim_start_matches('v');
         match v.split_once(NIGHTLY) {
-            Some((base, build)) => (nums(base), Some(nums(build))),
-            None => (nums(v), None),
+            Some((b, build)) => (base(b), Some(nums(build))),
+            None => (base(v), None),
         }
     };
     let cmp = |a: &[u64], b: &[u64]| {
@@ -410,7 +477,7 @@ pub fn newer(a: &str, b: &str) -> bool {
     match cmp(&a.0, &b.0) {
         Ordering::Equal => match (a.1, b.1) {
             (Some(x), Some(y)) => cmp(&x, &y).is_gt(),
-            (Some(_), None) => true,
+            (None, Some(_)) => true,
             _ => false,
         },
         o => o.is_gt(),
@@ -587,8 +654,9 @@ impl Updater {
 
     async fn run(&self, nightly: bool) -> anyhow::Result<State> {
         let http = client()?;
-        // Nightlies are prereleases, which the latest release never is: they're in the list.
-        let feed = std::env::var("YTM_UPDATE_FEED").unwrap_or_else(|_| if nightly { format!("{ALL_RELEASES}?per_page=30") } else { LATEST.to_owned() });
+        // The list, on stable too: GitHub's latest release is the one copies before 2.0.3
+        // read, so it can stay the 2.0.3 that brings 2.0.2 back to 0.x while 0.x goes on.
+        let feed = std::env::var("YTM_UPDATE_FEED").unwrap_or_else(|_| format!("{ALL_RELEASES}?per_page=30"));
         let feed: serde_json::Value = github_api(&http, &feed).await?.json().await?;
         let release = pick_release(feed, nightly).ok_or_else(|| anyhow::anyhow!("no releases found"))?;
         let tag = release["tag_name"].as_str().unwrap_or_default();
@@ -672,6 +740,9 @@ impl Updater {
         let unpacked = self.dir.join(format!("ytm-rs-{version}"));
         let ready = if cfg!(target_os = "macos") && !portable {
             open_dmg(&path, &unpacked)?
+        } else if appimage_file().is_some() {
+            // The AppImage is the whole app, nothing to unpack.
+            path
         } else if portable || cfg!(unix) {
             unzip_exe(&path, &unpacked)?
         } else {
@@ -685,7 +756,9 @@ impl Updater {
     /// (if `relaunch`) start the updated app.
     pub fn install(&self, relaunch: bool) {
         let State::Ready { installer, .. } = self.state() else { return };
-        let exe = std::env::current_exe().unwrap_or_default();
+        // An AppImage's binary is in its image, gone once it exits: the image file is
+        // what's replaced and started again.
+        let exe = appimage_file().unwrap_or_else(|| std::env::current_exe().unwrap_or_default());
         if !self.apply(&installer, &exe, relaunch) && relaunch {
             // Nothing changed: start this version again.
             start_after_exit(&exe);
@@ -1036,19 +1109,22 @@ name=io.github.grapedjuice.ytm-rs
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// The .deb's file name, which copies before 0.4.1 look for too (the version in it,
+    /// `~nightly`, is linux/deb.sh's).
     #[test]
     fn deb_versions() {
-        assert_eq!(deb_version("0.3.0"), "0.3.0");
-        assert_eq!(deb_version("0.3.0-nightly.20261111"), "0.3.0+nightly.20261111");
-        assert_eq!(deb_version("0.3.0-nightly.20261111.2"), "0.3.0+nightly.20261111.2");
+        assert_eq!(deb_version("0.4.1"), "0.4.1");
+        assert_eq!(deb_version("0.4.1-nightly.20261126"), "0.4.1+nightly.20261126");
+        assert_eq!(deb_version("0.4.1-nightly.20261126.2"), "0.4.1+nightly.20261126.2");
     }
 
-    /// The names makepkg gives linux/arch.sh's package, which the Arch copy looks for.
+    /// The names linux/arch.sh gives its package, which the Arch copy looks for, as do
+    /// copies before 0.4.1 (the pkgver in it, `0.4.1nightly.*`, is arch.sh's).
     #[test]
     fn pacman_packages() {
-        assert_eq!(pacman_package("0.3.0", "x86_64"), "ytm-rs-0.3.0-1-x86_64.pkg.tar.zst");
-        assert_eq!(pacman_package("0.3.0-nightly.20261111", "x86_64"), "ytm-rs-0.3.0.nightly.20261111-1-x86_64.pkg.tar.zst");
-        assert_eq!(pacman_package("0.3.0-nightly.20261111.2", "x86_64"), "ytm-rs-0.3.0.nightly.20261111.2-1-x86_64.pkg.tar.zst");
+        assert_eq!(pacman_package("0.4.1", "x86_64"), "ytm-rs-0.4.1-1-x86_64.pkg.tar.zst");
+        assert_eq!(pacman_package("0.4.1-nightly.20261126", "x86_64"), "ytm-rs-0.4.1.nightly.20261126-1-x86_64.pkg.tar.zst");
+        assert_eq!(pacman_package("0.4.1-nightly.20261126.2", "x86_64"), "ytm-rs-0.4.1.nightly.20261126.2-1-x86_64.pkg.tar.zst");
     }
 
     #[test]
@@ -1063,32 +1139,211 @@ name=io.github.grapedjuice.ytm-rs
 
     #[test]
     fn nightly_order() {
-        // After its version's release, before the next one.
-        assert!(newer("v0.2.34-nightly.20261110", "0.2.34"));
-        assert!(!newer("v0.2.34", "0.2.34-nightly.20261110"));
-        assert!(newer("v0.2.35", "0.2.34-nightly.20261110"));
-        assert!(!newer("v0.2.34-nightly.20261110", "0.2.35"));
+        // Before the version it leads up to, after the one before.
+        assert!(newer("v0.4.1-nightly.20261126", "0.4.0"));
+        assert!(!newer("v0.4.0", "0.4.1-nightly.20261126"));
+        assert!(newer("v0.4.1", "0.4.1-nightly.20261126"));
+        assert!(!newer("v0.4.1-nightly.20261126", "0.4.1"));
+        assert!(newer("v0.4.1", "0.4.1-nightly.20261126.3"));
         // By build, then a second build the same day.
-        assert!(newer("v0.2.34-nightly.20261111", "0.2.34-nightly.20261110"));
-        assert!(newer("v0.2.34-nightly.20261110.2", "0.2.34-nightly.20261110"));
-        assert!(!newer("v0.2.34-nightly.20261110", "0.2.34-nightly.20261110"));
-        assert!(newer("v0.2.35-nightly.20261101", "0.2.34-nightly.20261130"));
+        assert!(newer("v0.4.1-nightly.20261127", "0.4.1-nightly.20261126"));
+        assert!(newer("v0.4.1-nightly.20261126.2", "0.4.1-nightly.20261126"));
+        assert!(newer("v0.4.1-nightly.20261126.10", "0.4.1-nightly.20261126.9"));
+        assert!(newer("v0.4.1-nightly.20261127", "0.4.1-nightly.20261126.2"));
+        assert!(!newer("v0.4.1-nightly.20261126", "0.4.1-nightly.20261126"));
+        assert!(!newer("v0.4.1-nightly.20261126", "0.4.1-nightly.20261126.2"));
+        // A higher version's nightly is newer, whatever the dates.
+        assert!(newer("v0.5.0-nightly.20261101", "0.4.1-nightly.20261130"));
+        assert!(newer("v0.5.0-nightly.20261101", "0.4.1"));
+        assert!(!newer("v0.4.1", "0.5.0-nightly.20261101"));
+        // The old naming (after 0.4.0) counts as before 0.4.0 now, and before any newly named one.
+        assert!(newer("v0.4.1-nightly.20261126", "0.4.0-nightly.20261126"));
+        assert!(newer("v0.4.0", "0.4.0-nightly.20261126"));
+    }
+
+    /// 2.0.x counts as 0.3.4.x: 2.0.2 and 2.0.3 go on to 0.4.x and its nightlies, and
+    /// nothing goes back to them.
+    #[test]
+    fn two_point_oh() {
+        for v in ["2.0.2", "2.0.3", "2.0.2-nightly.20261124"] {
+            for later in ["v0.4.0", "v0.4.1-nightly.20261126", "v0.4.1", "v0.5.0-nightly.20261201"] {
+                assert!(newer(later, v), "{later} over {v}");
+                assert!(!newer(&format!("v{v}"), later.trim_start_matches('v')), "{v} over {later}");
+            }
+        }
+        assert!(newer("v2.0.3", "2.0.2"));
+        assert!(newer("v2.0.2", "0.3.4"));
+        assert!(wanted("v0.4.1-nightly.20261126", "2.0.2", true));
+        assert!(wanted("v0.4.0", "2.0.3", false));
+        assert!(!wanted("v2.0.3", "0.4.1-nightly.20261126", true));
+    }
+
+    fn release(tag: &str, prerelease: bool) -> serde_json::Value {
+        json!({ "tag_name": tag, "prerelease": prerelease, "draft": false })
+    }
+
+    /// What the feed would list, newest first: `extra`, then the releases up to now, with
+    /// nightlies of the old naming, a test build and a draft.
+    fn feed(extra: &[serde_json::Value]) -> serde_json::Value {
+        let mut list = extra.to_vec();
+        list.extend([
+            release("test-wayland-tray-1", true),
+            json!({ "tag_name": "v9.9.9", "prerelease": false, "draft": true }),
+            release("v0.4.0-nightly.20261126", true),
+            release("v0.4.0-nightly.20261125", true),
+            release("v0.4.0", false),
+            release("v2.0.3", false),
+            release("v2.0.2-nightly.20261124", true),
+            release("v2.0.2", false),
+            release("v0.3.4-nightly.20261122", true),
+            release("v0.3.4", false),
+        ]);
+        serde_json::Value::Array(list)
+    }
+
+    /// The release a copy on `current` would install from `feed`, if any.
+    fn update(feed: &serde_json::Value, current: &str, nightly: bool) -> Option<String> {
+        let tag = pick_release(feed.clone(), nightly)?["tag_name"].as_str()?.to_owned();
+        wanted(&tag, current, nightly).then_some(tag)
     }
 
     #[test]
     fn channels() {
-        let r = |tag: &str, pre: bool| json!({ "tag_name": tag, "prerelease": pre, "draft": false });
-        let list = json!([r("test-wayland-tray-1", true), r("v0.2.34-nightly.20261110", true), r("v0.2.34", false), r("v0.2.33", false)]);
-        let tag = |nightly| pick_release(list.clone(), nightly).unwrap()["tag_name"].as_str().unwrap().to_owned();
-        assert_eq!(tag(false), "v0.2.34");
-        assert_eq!(tag(true), "v0.2.34-nightly.20261110");
-        // A stable release after the nightly wins on the nightly channel too.
-        let list = json!([r("v0.2.35", false), r("v0.2.34-nightly.20261110", true)]);
-        assert_eq!(pick_release(list, true).unwrap()["tag_name"], "v0.2.35");
-        // Back on stable from a nightly: the stable release, though older.
-        assert!(wanted("v0.2.34", "0.2.34-nightly.20261110", false));
-        assert!(!wanted("v0.2.34", "0.2.34-nightly.20261110", true));
-        assert!(!wanted("v0.2.34", "0.2.34", false));
-        assert!(wanted("v0.2.34-nightly.20261111", "0.2.34-nightly.20261110", true));
+        let none = feed(&[]);
+        // Stable never offers a nightly, a test build or a draft, nor goes back to 2.0.x.
+        assert_eq!(pick_release(none.clone(), false).unwrap()["tag_name"], "v0.4.0");
+        assert_eq!(update(&none, "0.4.0", false), None);
+        // Until the first newly named nightly, the nightly channel has nothing over 0.4.0.
+        assert_eq!(update(&none, "0.4.0", true), None);
+
+        let one = feed(&[release("v0.4.1-nightly.20261127", true)]);
+        assert_eq!(update(&one, "0.4.0", false), None);
+        assert_eq!(update(&one, "0.4.0", true).as_deref(), Some("v0.4.1-nightly.20261127"));
+        // From the old naming.
+        assert_eq!(update(&one, "0.4.0-nightly.20261126", true).as_deref(), Some("v0.4.1-nightly.20261127"));
+        assert_eq!(update(&one, "0.4.1-nightly.20261127", true), None);
+
+        // A later day, and a second build the same day.
+        let two = feed(&[release("v0.4.1-nightly.20261128", true), release("v0.4.1-nightly.20261127", true)]);
+        assert_eq!(update(&two, "0.4.1-nightly.20261127", true).as_deref(), Some("v0.4.1-nightly.20261128"));
+        let same_day = feed(&[release("v0.4.1-nightly.20261127.2", true), release("v0.4.1-nightly.20261127", true)]);
+        assert_eq!(update(&same_day, "0.4.1-nightly.20261127", true).as_deref(), Some("v0.4.1-nightly.20261127.2"));
+        assert_eq!(update(&same_day, "0.4.1-nightly.20261127.2", true), None);
+
+        // 0.4.1 is released: nightly users get it, over its own nightlies still listed.
+        let released = feed(&[release("v0.4.1", false), release("v0.4.1-nightly.20261128", true), release("v0.4.1-nightly.20261127", true)]);
+        assert_eq!(pick_release(released.clone(), true).unwrap()["tag_name"], "v0.4.1");
+        assert_eq!(update(&released, "0.4.1-nightly.20261128", true).as_deref(), Some("v0.4.1"));
+        assert_eq!(update(&released, "0.4.1", true), None);
+        assert_eq!(update(&released, "0.4.0", false).as_deref(), Some("v0.4.1"));
+        // And then the next patch's nightlies.
+        let next = feed(&[release("v0.4.2-nightly.20261130", true), release("v0.4.1", false), release("v0.4.1-nightly.20261128", true)]);
+        assert_eq!(update(&next, "0.4.1", true).as_deref(), Some("v0.4.2-nightly.20261130"));
+        assert_eq!(update(&next, "0.4.1-nightly.20261128", true).as_deref(), Some("v0.4.2-nightly.20261130"));
+        assert_eq!(update(&next, "0.4.1", false), None);
+
+        // Bumped by hand to 0.5.0: its nightlies go after 0.4.1's.
+        let minor = feed(&[release("v0.5.0-nightly.20261201", true), release("v0.4.1-nightly.20261130", true)]);
+        assert_eq!(update(&minor, "0.4.1-nightly.20261130", true).as_deref(), Some("v0.5.0-nightly.20261201"));
+        let minor_out = feed(&[release("v0.5.0", false), release("v0.5.0-nightly.20261201", true)]);
+        assert_eq!(update(&minor_out, "0.5.0-nightly.20261201", true).as_deref(), Some("v0.5.0"));
+        assert_eq!(update(&minor_out, "0.4.1-nightly.20261130", true).as_deref(), Some("v0.5.0"));
+
+        // Never back from a newly named nightly to 0.4.0 or an old-named one.
+        assert_eq!(update(&none, "0.4.1-nightly.20261127", true), None);
+        assert!(!wanted("v0.4.0-nightly.20261126", "0.4.1-nightly.20261127", true));
+        assert!(!wanted("v0.4.0", "0.4.1-nightly.20261127", true));
+    }
+
+    /// Back on stable from a nightly: the latest stable release, though older, once.
+    #[test]
+    fn nightly_back_to_stable() {
+        let f = feed(&[release("v0.4.1-nightly.20261127", true)]);
+        assert_eq!(update(&f, "0.4.1-nightly.20261127", false).as_deref(), Some("v0.4.0"));
+        // Then stays there: no loop between them.
+        assert_eq!(update(&f, "0.4.0", false), None);
+        // An old-named nightly too.
+        assert_eq!(update(&f, "0.4.0-nightly.20261126", false).as_deref(), Some("v0.4.0"));
+        // Once its version is out, that's the one.
+        let released = feed(&[release("v0.4.1", false), release("v0.4.1-nightly.20261127", true)]);
+        assert_eq!(update(&released, "0.4.1-nightly.20261127", false).as_deref(), Some("v0.4.1"));
+        assert_eq!(update(&released, "0.4.1", false), None);
+    }
+
+    /// The updater as copies up to now have it (the order before nightlies were named
+    /// after the next version): what they install from the feed now.
+    mod before {
+        use super::super::{NIGHTLY, is_nightly};
+        use super::{feed, release};
+        use std::cmp::Ordering;
+
+        fn newer(a: &str, b: &str) -> bool {
+            let nums = |s: &str| s.split('.').map(|p| p.parse::<u64>().unwrap_or(0)).collect::<Vec<_>>();
+            let base = |s: &str| match nums(s).as_slice() {
+                [2, 0, rest @ ..] => [0, 3, 4].iter().chain(rest).copied().collect(),
+                n => n.to_vec(),
+            };
+            let parse = |v: &str| {
+                let v = v.trim_start_matches('v');
+                match v.split_once(NIGHTLY) {
+                    Some((b, build)) => (base(b), Some(nums(build))),
+                    None => (base(v), None),
+                }
+            };
+            let cmp = |a: &[u64], b: &[u64]| {
+                (0..a.len().max(b.len())).map(|i| a.get(i).copied().unwrap_or(0).cmp(&b.get(i).copied().unwrap_or(0))).find(|o| o.is_ne()).unwrap_or(Ordering::Equal)
+            };
+            let (a, b) = (parse(a), parse(b));
+            match cmp(&a.0, &b.0) {
+                Ordering::Equal => match (a.1, b.1) {
+                    (Some(x), Some(y)) => cmp(&x, &y).is_gt(),
+                    (Some(_), None) => true,
+                    _ => false,
+                },
+                o => o.is_gt(),
+            }
+        }
+
+        fn pick_release(feed: serde_json::Value, nightly: bool) -> Option<serde_json::Value> {
+            let serde_json::Value::Array(list) = feed else { return Some(feed) };
+            let tag = |r: &serde_json::Value| r["tag_name"].as_str().unwrap_or_default().to_owned();
+            list.into_iter()
+                .filter(|r| !r["draft"].as_bool().unwrap_or(false))
+                .filter(|r| if r["prerelease"].as_bool().unwrap_or(false) { nightly && is_nightly(&tag(r)) } else { true })
+                .reduce(|best, r| if newer(&tag(&r), &tag(&best)) { r } else { best })
+        }
+
+        fn wanted(tag: &str, current: &str, nightly: bool) -> bool {
+            newer(tag, current) || (!nightly && is_nightly(current) && !is_nightly(tag) && !tag.is_empty() && tag.trim_start_matches('v') != current)
+        }
+
+        fn update(feed: &serde_json::Value, current: &str, nightly: bool) -> Option<String> {
+            let tag = pick_release(feed.clone(), nightly)?["tag_name"].as_str()?.to_owned();
+            wanted(&tag, current, nightly).then_some(tag)
+        }
+
+        #[test]
+        fn copies_from_before_go_on_to_the_new_names() {
+            let one = feed(&[release("v0.4.1-nightly.20261127", true)]);
+            // On an old-named nightly, or on 0.4.0 with the nightly channel picked.
+            assert_eq!(update(&one, "0.4.0-nightly.20261126", true).as_deref(), Some("v0.4.1-nightly.20261127"));
+            assert_eq!(update(&one, "0.4.0-nightly.20261125", true).as_deref(), Some("v0.4.1-nightly.20261127"));
+            assert_eq!(update(&one, "0.4.0", true).as_deref(), Some("v0.4.1-nightly.20261127"));
+            // Stable: still nothing but 0.4.0, and an old-named nightly switched to stable gets it.
+            assert_eq!(update(&one, "0.4.0", false), None);
+            assert_eq!(update(&one, "0.4.0-nightly.20261126", false).as_deref(), Some("v0.4.0"));
+            // From 2.0.2 and 2.0.3, as before.
+            assert_eq!(update(&one, "2.0.2", true).as_deref(), Some("v0.4.1-nightly.20261127"));
+            assert_eq!(update(&one, "2.0.3", false).as_deref(), Some("v0.4.0"));
+            // One left behind until after 0.4.1 is out picks one of its nightlies over it (the
+            // old order has nightlies after their version): a step on the way, as that
+            // nightly has the new order and goes on to 0.4.1.
+            let released = feed(&[release("v0.4.1", false), release("v0.4.1-nightly.20261128", true)]);
+            assert_eq!(update(&released, "0.4.0-nightly.20261126", true).as_deref(), Some("v0.4.1-nightly.20261128"));
+            assert_eq!(super::update(&released, "0.4.1-nightly.20261128", true).as_deref(), Some("v0.4.1"));
+            // Once those are gone from the feed, straight on to the next ones.
+            let later = feed(&[release("v0.4.2-nightly.20261210", true), release("v0.4.1", false)]);
+            assert_eq!(update(&later, "0.4.0-nightly.20261126", true).as_deref(), Some("v0.4.2-nightly.20261210"));
+        }
     }
 }

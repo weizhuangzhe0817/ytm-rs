@@ -32,6 +32,10 @@ window-loading-notes = Versionshinweise werden geladen…
 window-later = Später
 window-updated = Auf { $version } aktualisiert
 window-what-changed = Das hat sich geändert.
+window-more-changes = { $count ->
+    [one] + { $count } weitere Änderung
+   *[other] + { $count } weitere Änderungen
+}
 window-dismiss = Ausblenden
 window-all-notes = Alle Hinweise anzeigen
 window-got-it = Verstanden
@@ -39,6 +43,7 @@ window-installed-when-closed = Version { $version } ist bereit. Sie wird beim Sc
 window-notes-status = Du nutzt Version { $version }. { $step }
 window-package-instructions = Lade das neue Paket herunter und installiere es mit sudo pacman -U.
 window-package-download = Lade die neue .deb-Datei herunter und öffne sie zur Installation.
+window-package-appimage = Lade das neue AppImage herunter und nimm es anstelle dieses.
 window-package-flatpak = Diese Version wird über Flatpak aktualisiert: Führe flatpak update aus oder sieh in deinem Software-Center nach.
 window-keyboard-volume-up = Lauter
 window-keyboard-volume-down = Leiser

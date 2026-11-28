@@ -193,7 +193,7 @@ impl ListFind {
         icon_at(ui, pos2(rect.left() + 18.0, rect.center().y), icon::SEARCH, 15.0, theme::text_dim());
         let clearable = !self.query.is_empty();
         let end = rect.right() - if clearable { 36.0 } else { 12.0 };
-        let count = self.searching(page).then(|| self.rows(page, tracks)).flatten().map(|s| ui.painter().layout_no_wrap(format!("{} of {total}", s.len()), theme::regular(12.5), theme::text_faint()));
+        let count = self.searching(page).then(|| self.rows(page, tracks)).flatten().map(|s| ui.painter().layout_no_wrap(crate::tr!("ui-find-count", found = s.len(), total = total), theme::regular(12.5), theme::text_faint()));
         let count_w = count.as_ref().map_or(0.0, |g| g.size().x + 8.0);
         let inner = Rect::from_min_max(pos2(rect.left() + 34.0, rect.top() + 3.0), pos2((end - count_w).max(rect.left() + 60.0), rect.bottom() - 3.0));
         if let Some(g) = count {
@@ -286,6 +286,13 @@ pub fn run(shown: Option<&[usize]>, from: usize, to: usize) -> Vec<usize> {
     }
 }
 
+/// Whether every word of `query` is somewhere in `text`, case and accents aside. An empty
+/// query matches everything.
+pub(super) fn has_words(text: &str, query: &str) -> bool {
+    let text = fold(text);
+    fold(query).split_whitespace().all(|w| text.contains(w))
+}
+
 /// Every word (folded) is somewhere in the song's title, artists or album, accents aside.
 fn matches(t: &Track, words: &[&str]) -> bool {
     let title = fold(&t.title);
@@ -296,8 +303,17 @@ fn matches(t: &Track, words: &[&str]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{KEEP_SORTS, LibTab, ListFind, Page, Sort, Track, run};
+    use super::{KEEP_SORTS, LibTab, ListFind, Page, Sort, Track, has_words, run};
     use crate::model::{Card, Link, Target};
+
+    /// The playlist picker's search: each word anywhere in the name, case and accents aside.
+    #[test]
+    fn a_playlist_is_found_by_any_of_its_words() {
+        assert!(has_words("Chill Évening Mix", ""));
+        assert!(has_words("Chill Évening Mix", "mix evening"));
+        assert!(has_words("Chill Évening Mix", "  CHILL  "));
+        assert!(!has_words("Chill Évening Mix", "chill morning"));
+    }
 
     fn link(name: &str) -> Link {
         Link { name: name.into(), id: None }

@@ -140,6 +140,17 @@ impl Queue {
         true
     }
 
+    /// `replace`, with shuffle carrying over as repeat does: on, the song picked plays first
+    /// and the rest are shuffled behind it, as the Shuffle button would (#376).
+    pub fn replace_keeping_shuffle(&mut self, tracks: Vec<Track>, start: usize, fill: Option<QueueFill>) -> bool {
+        let shuffled = self.shuffled();
+        let played = self.replace(tracks, start, fill);
+        if played && shuffled {
+            self.toggle_shuffle();
+        }
+        played
+    }
+
     /// Only the song playing is left, for a radio from it to follow, without it starting
     /// over. Unlike `replace` it stays when it's an explicit one left to finish.
     pub fn keep_current(&mut self) -> Option<Track> {
@@ -526,6 +537,13 @@ impl Queue {
         Some(Filled { ran_out, was_at_end })
     }
 
+    /// Every song in the queue, in its order and each once: what Save queue puts in a
+    /// playlist. Play next and Add to queue can queue a song again, and it'd go in twice.
+    pub fn songs_once(&self) -> Vec<Track> {
+        let mut seen = std::collections::HashSet::new();
+        self.tracks.iter().filter(|t| seen.insert(t.id.as_str())).cloned().collect()
+    }
+
     /// The part of the queue a saved session keeps, and the current song's place in it.
     pub fn saved(&self) -> Option<(&[Track], usize)> {
         let i = self.index?;
@@ -619,6 +637,31 @@ mod tests {
     }
 
     #[test]
+    fn shuffle_carries_over_to_a_song_picked_from_a_list() {
+        let list: Vec<Track> = ["a", "b", "c", "d", "e", "f"].map(track).into();
+        let mut q = Queue::new(Repeat::Off);
+        // Off: the list in its order, from the song picked.
+        assert!(q.replace_keeping_shuffle(list.clone(), 3, None));
+        assert!(!q.shuffled());
+        assert_eq!((ids(&q), q.index), (vec!["a", "b", "c", "d", "e", "f"], Some(3)));
+        // On: still on, the song picked first and the whole list behind it.
+        q.toggle_shuffle();
+        assert!(q.replace_keeping_shuffle(list.clone(), 3, None));
+        assert!(q.shuffled());
+        assert_eq!((q.index, q.current().unwrap().id.as_str()), (Some(0), "d"));
+        let mut all = ids(&q);
+        all.sort();
+        assert_eq!(all, ["a", "b", "c", "d", "e", "f"]);
+        // Turning it off puts the list back in order, going on from the song playing.
+        q.toggle_shuffle();
+        assert_eq!((ids(&q), q.index), (vec!["a", "b", "c", "d", "e", "f"], Some(3)));
+        // A plain replace (a radio) still turns it off.
+        q.toggle_shuffle();
+        q.replace(vec![track("r")], 0, None);
+        assert!(!q.shuffled());
+    }
+
+    #[test]
     fn a_mixed_in_song_the_playlist_has_too_stays_once_with_shuffle_off() {
         let songs: Vec<Track> = ["a", "b", "c", "d", "e", "f", "g", "h"].map(track).into();
         let mut q = Queue::new(Repeat::Off);
@@ -675,6 +718,18 @@ mod tests {
         q.tracks[0].explicit = true;
         q.hide_explicit = true;
         assert!(!q.advance());
+    }
+
+    #[test]
+    fn save_queue_takes_every_song_once_in_queue_order() {
+        let mut q = queue(&["a", "b", "c"], 1, Repeat::Off);
+        q.play_next(track("c"));
+        q.enqueue(track("a"));
+        q.enqueue(track("d"));
+        assert_eq!(ids(&q), ["a", "b", "c", "c", "a", "d"]);
+        let saved: Vec<String> = q.songs_once().into_iter().map(|t| t.id).collect();
+        assert_eq!(saved, ["a", "b", "c", "d"]);
+        assert!(Queue::new(Repeat::Off).songs_once().is_empty());
     }
 
     fn track(id: &str) -> Track {

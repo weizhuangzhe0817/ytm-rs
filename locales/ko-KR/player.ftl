@@ -1,5 +1,11 @@
-### Player controls and synced lyrics.
+### The player: the bar along the bottom, now playing and the mini player.
 
+# For screen readers, on the time beside the progress line ("0:36 / 1:27"), which a
+# click switches to the time left ("-0:51 / 1:27") and back. { $time } is the time as shown.
+player-time-show-left = { $time }. 남은 시간 표시
+player-time-show-length = { $time }. 곡 길이 표시
+
+# From the interface-wide catalog (#228).
 player-full-screen = 전체 화면
 player-exit-full-screen = 전체 화면 종료
 player-pip = PIP(Picture in Picture)
@@ -19,6 +25,8 @@ player-sync-none = 동기화되지 않음
 player-lyrics-source = 가사 출처
 player-only-lyrics-source = 가사 출처 · 하나만 검색됨
 player-lyrics-source-name = 가사 출처: { $name }
+player-lyrics-from-unison = Unison의 가사
+player-lyrics-submitted-by = { $name } 님이 제출
 player-timing = 타이밍
 player-lyrics-later = 나중에 가사(+0.1초)
 player-lyrics-earlier = 이전 가사(−0.1초)
@@ -49,3 +57,7 @@ player-play-next = 다음 플레이
 player-start-radio = 라디오 시작
 player-go-to-album = 앨범 바로가기
 player-go-to-artist = 아티스트로 이동
+player-sleep-timer = 취침 타이머
+player-sleep-off = 끄기
+player-sleep-minutes = { $minutes }분
+player-sleep-song-end = 곡 끝

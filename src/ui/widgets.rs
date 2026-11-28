@@ -219,6 +219,12 @@ pub fn tip_if_elided(ui: &Ui, rect: Rect, g: &egui::Galley, text: &str) {
     }
 }
 
+/// Paints `g` at `pos`, with `text` in a hover tooltip when `g` was cut short.
+pub fn galley_tipped(ui: &Ui, pos: Pos2, g: std::sync::Arc<egui::Galley>, color: Color32, text: &str) {
+    ui.painter().galley(pos, g.clone(), color);
+    tip_if_elided(ui, Rect::from_min_size(pos, g.size()), &g, text);
+}
+
 fn tip_full_text(ui: &Ui, rect: Rect, text: &str) {
     if text.is_empty() || ui.is_sizing_pass() {
         return;
@@ -330,7 +336,7 @@ fn badge_mask(side: usize) -> egui::ColorImage {
 
 /// What a screen reader calls a song: its title, and whether it's explicit.
 pub fn song_name(title: &str, explicit: bool) -> std::borrow::Cow<'_, str> {
-    if explicit { format!("{title}, Explicit").into() } else { title.into() }
+    if explicit { crate::tr!("player-song-explicit", title = title).into() } else { title.into() }
 }
 
 /// Single-line text whose artist names are links: underlined on hover, and a click
@@ -395,6 +401,8 @@ pub fn icon_at(ui: &Ui, center: Pos2, glyph: char, size: f32, color: Color32) {
     let g = ui.painter().layout_no_wrap(glyph.to_string(), theme::icon_font(size), color);
     let ink = g.mesh_bounds;
     let pos = if ink.is_positive() { center - ink.center().to_vec2() } else { center - g.size() / 2.0 };
+    // Play is a triangle: centred on its box, its weight sits left. Centre its centroid.
+    let pos = if glyph == theme::icon::PLAY { pos + vec2(0.083 * size, 0.0) } else { pos };
     ui.painter().galley(pos, g, color);
 }
 
@@ -916,10 +924,14 @@ pub fn card(ui: &mut Ui, c: &Card, width: f32, liked: bool, pin: Option<bool>, a
     let title = galley_wrapped(ui, &c.title, theme::weighted(cl.title_weight, cl.title_px), tcolor, width, 2);
     let title_h = title.size().y;
     let title_pos = pos2(rect.left(), img.bottom() + 10.0);
-    ui.painter().galley(title_pos, title.clone(), tcolor);
-    tip_if_elided(ui, Rect::from_min_size(title_pos, title.size()), &title, &c.title);
+    galley_tipped(ui, title_pos, title, tcolor, &c.title);
     let sub_y = img.bottom() + 14.0 + title_h;
-    linked_text(ui, pos2(rect.left(), sub_y), &c.subtitle, &c.links, theme::regular(13.0), theme::with_alpha(theme::text_dim(), cl.subtitle_alpha), width - 36.0, acts);
+    // A playlist kept downloaded is marked at the start of its subtitle.
+    let mark_w = if kept_downloaded(ui, &c.target) { DOWNLOAD_MARK_W } else { 0.0 };
+    if mark_w > 0.0 {
+        download_mark(ui, rect.left(), sub_y + 8.0, 1.0);
+    }
+    linked_text(ui, pos2(rect.left() + mark_w, sub_y), &c.subtitle, &c.links, theme::regular(13.0), theme::with_alpha(theme::text_dim(), cl.subtitle_alpha), width - 36.0 - mark_w, acts);
     // On the subtitle line, whose width leaves room for it, so a two-line title never sits under it.
     let more_rect = Rect::from_center_size(pos2(rect.right() - 16.0, sub_y + 8.0), Vec2::splat(30.0));
     let more = more_button(ui, more_rect, resp.id.with("more"), crate::tr!("ui-options"));
@@ -938,6 +950,28 @@ pub fn card(ui: &mut Ui, c: &Card, width: f32, liked: bool, pin: Option<bool>, a
     } else if resp.clicked() && !more.clicked() {
         acts.push(Action::Open(c.target.clone()));
     }
+}
+
+/// Whether the playlist `target` is kept downloaded (its menu's Keep downloaded).
+pub fn kept_downloaded(ui: &Ui, target: &Target) -> bool {
+    let Target::Playlist(id) = target else { return false };
+    ui.ctx().data(|d| d.get_temp::<std::sync::Arc<Vec<String>>>(egui::Id::unique("kept-downloaded"))).is_some_and(|k| k.contains(id))
+}
+
+/// Room the download mark takes at the start of a line, its gap after included.
+pub const DOWNLOAD_MARK_W: f32 = 18.0;
+
+/// The mark of a downloaded song or a playlist kept downloaded, at the start of a line
+/// whose middle is `y`: an arrow down in a filled circle, as other music apps show it.
+/// `alpha` fades it with the line it's on.
+pub fn download_mark(ui: &Ui, x: f32, y: f32, alpha: f32) {
+    let accent = ui.ctx().data(|d| d.get_temp::<Color32>(egui::Id::unique("accent"))).unwrap_or(theme::RED);
+    let c = pos2(x + 6.5, y);
+    ui.painter().circle_filled(c, 6.5, theme::with_alpha(accent, alpha));
+    // Dark or white, whichever reads better on the accent.
+    let ink = egui::Stroke::new(1.4, theme::with_alpha(theme::on_fill(accent), alpha));
+    ui.painter().line_segment([c + vec2(0.0, -3.5), c + vec2(0.0, 3.2)], ink);
+    ui.painter().line(vec![c + vec2(-2.8, 0.6), c + vec2(0.0, 3.4), c + vec2(2.8, 0.6)], ink);
 }
 
 /// While the album or playlist `id` downloads, its whole cover darkens, then the darkness
@@ -1043,12 +1077,14 @@ fn popup_extras(ctx: &egui::Context, id: egui::Id) {
     let now = ctx.input(|i| i.time);
     let since = ctx.data_mut(|d| *d.get_temp_mut_or_insert_with(opened, || now));
     ctx.data_mut(|d| d.insert_temp(egui::Id::unique("menu-opened"), since));
-    if look.menu_look.item_slide > 0.0 && now - since < 0.2 {
+    // Off: the menu is open at full size from its first frame.
+    let since = if theme::anim_off() { f64::NEG_INFINITY } else { since };
+    if look.menu_look.item_slide > 0.0 && now - since < theme::secs(0.2) {
         ctx.request_repaint();
     }
     let scale = match look.menu_look.pop {
         Some([from, secs]) => {
-            let t = ((now - since) as f32 / secs.max(0.01)).clamp(0.0, 1.0);
+            let t = ((now - since) as f32 / theme::secs(f64::from(secs.max(0.01))) as f32).clamp(0.0, 1.0);
             if t < 1.0 {
                 ctx.request_repaint();
             }
@@ -1057,10 +1093,9 @@ fn popup_extras(ctx: &egui::Context, id: egui::Id) {
         None => 1.0,
     };
     let Some(rect) = ctx.memory(|m| m.area_rect(id)) else { return };
-    if scale < 1.0 {
-        let c = rect.center().to_vec2();
-        ctx.set_transform_layer(egui::LayerId::new(egui::Order::Foreground, id), egui::emath::TSTransform::from_translation(c) * egui::emath::TSTransform::from_scaling(scale) * egui::emath::TSTransform::from_translation(-c));
-    }
+    // Set every frame, so the zoom's last frame leaves the menu at full size.
+    let c = rect.center().to_vec2();
+    ctx.set_transform_layer(egui::LayerId::new(egui::Order::Foreground, id), egui::emath::TSTransform::from_translation(c) * egui::emath::TSTransform::from_scaling(scale) * egui::emath::TSTransform::from_translation(-c));
     if let Some(glass) = look.glass.menu {
         // On a layer of its own just under the popups.
         let layer = egui::LayerId::new(egui::Order::Middle, egui::Id::unique("menu-frost"));
@@ -1152,9 +1187,9 @@ fn menu_row(ui: &mut Ui, glyph: Option<char>, label: &str, arrow: bool, unlike: 
     }
     let color = if response.hovered() { theme::text() } else { theme::text_dim() };
     // Rows slide in as the menu opens.
-    let slide = if m.item_slide > 0.0 {
+    let slide = if m.item_slide > 0.0 && !theme::anim_off() {
         let since = ui.ctx().input(|i| i.time) - ui.ctx().data(|d| d.get_temp::<f64>(egui::Id::unique("menu-opened"))).unwrap_or(0.0);
-        m.item_slide * (1.0 - theme::ease_out(since as f32 / 0.2))
+        m.item_slide * (1.0 - theme::ease_out(since as f32 / theme::secs(0.2) as f32))
     } else {
         0.0
     };
@@ -1202,7 +1237,7 @@ pub fn song_actions(ui: &mut Ui, t: &Track, liked: bool, remove: Option<usize>, 
     if menu_action(ui, None, crate::tr!("ui-copy-link")) {
         acts.push(Action::Share(Target::Song(t.clone())));
     }
-    match crate::downloads::path(&t.id) {
+    match crate::downloads::file_for(t) {
         Some(path) => {
             if menu_action(ui, Some(icon::FOLDER_OPEN), crate::tr!("widget-show-in-folder")) {
                 crate::downloads::show_file(&path);
@@ -1271,7 +1306,7 @@ pub fn song_action_icons(ui: &mut Ui, t: &Track, liked: bool, acts: &mut Vec<Act
         if icon(ui, icon::LINK, crate::tr!("ui-copy-link")) {
             acts.push(Action::Share(Target::Song(t.clone())));
         }
-        match crate::downloads::path(&t.id) {
+        match crate::downloads::file_for(t) {
             Some(path) => {
                 if icon(ui, icon::FOLDER_OPEN, crate::tr!("widget-show-in-folder")) {
                     crate::downloads::show_file(&path);
@@ -1394,11 +1429,13 @@ pub fn play_pause_glyph(ui: &Ui, center: Pos2, r: f32, color: Color32, playing: 
     }
 }
 
+/// A play triangle `r` tall each way from `center`, with its centroid (not its box) there,
+/// so in a round button it looks centred rather than leaning left.
 pub fn play_triangle(ui: &Ui, center: Pos2, r: f32, color: Color32) {
     let pts = vec![
-        center + vec2(-r * 0.6, -r),
-        center + vec2(r * 1.0, 0.0),
-        center + vec2(-r * 0.6, r),
+        center + vec2(-r * 0.6 + r / 15.0, -r),
+        center + vec2(r + r / 15.0, 0.0),
+        center + vec2(-r * 0.6 + r / 15.0, r),
     ];
     ui.painter().add(egui::Shape::convex_polygon(pts, color, egui::Stroke::NONE));
 }
@@ -1622,7 +1659,7 @@ pub fn track_row(ui: &mut Ui, t: &Track, o: &RowOpts, acts: &mut Vec<Action>) ->
         (true, false, true) => (avail * 0.78, Some(x + avail * 0.82), None),
         _ => (avail, None, None),
     };
-    let plays = t.plays.map(|n| format!("{} plays", crate::backend::compact(n)));
+    let plays = t.plays.map(|n| crate::tr!("status-plays", count = n, shown = crate::i18n::decimal(&crate::backend::compact(n))));
     let title_col = if dimmed { theme::with_alpha(theme::text_dim(), opacity) } else if o.current { o.accent } else { theme::text() };
     let sub = match (album_row, &plays, plays_x) {
         (true, Some(p), None) => Some(p.clone()),
@@ -1637,9 +1674,16 @@ pub fn track_row(ui: &mut Ui, t: &Track, o: &RowOpts, acts: &mut Vec<Action>) ->
         (sub, _) => sub,
     };
     let title_y = if sub.is_some() { cy - 18.0 } else { cy - 9.0 };
-    title_at(ui, pos2(x, title_y), &t.title, t.explicit, theme::semibold(14.5), title_col, title_w);
+    // A downloaded song is marked at the start of its second line (of its only one, with none).
+    let marked = crate::downloads::is_listed(t);
+    let mark_w = if marked { DOWNLOAD_MARK_W } else { 0.0 };
+    let (title_x, title_room) = if sub.is_none() { (x + mark_w, title_w - mark_w) } else { (x, title_w) };
+    if marked {
+        download_mark(ui, x, if sub.is_some() { cy + 10.0 } else { cy }, opacity);
+    }
+    title_at(ui, pos2(title_x, title_y), &t.title, t.explicit, theme::semibold(14.5), title_col, title_room);
     if let Some(sub) = &sub {
-        linked_text(ui, pos2(x, cy + 2.0), sub, &t.artists, theme::regular(13.0), dim, title_w, acts);
+        linked_text(ui, pos2(x + mark_w, cy + 2.0), sub, &t.artists, theme::regular(13.0), dim, title_w - mark_w, acts);
     }
     if let (Some(px), Some(p)) = (plays_x, &plays) {
         ui.painter().text(pos2(px, cy), Align2::LEFT_CENTER, p, theme::regular(13.5), dim);
@@ -1820,9 +1864,11 @@ fn checkbox(ui: &Ui, c: Pos2, on: bool) {
     }
 }
 
-/// Section header with optional strapline/avatar and ‹ › scroll arrows.
+/// Section header with optional strapline/avatar and ‹ › scroll arrows, which of them have
+/// somewhere to go ([`shelf_arrows`]). One that doesn't is dimmed, so the other keeps its
+/// place under the pointer; with neither, both are hidden.
 /// Returns (scroll left, scroll right) clicks.
-pub fn shelf_header(ui: &mut Ui, title: &str, strap: Option<&str>, strap_thumb: Option<&str>, arrows: bool) -> (bool, bool) {
+pub fn shelf_header(ui: &mut Ui, title: &str, strap: Option<&str>, strap_thumb: Option<&str>, arrows: Option<(bool, bool)>) -> (bool, bool) {
     let mut res = (false, false);
     let look = &crate::preset::active().app;
     ui.add_space(26.0);
@@ -1839,11 +1885,16 @@ pub fn shelf_header(ui: &mut Ui, title: &str, strap: Option<&str>, strap_thumb: 
             }
             ui.label(egui::RichText::new(title).font(theme::weighted(look.heading_weight, look.heading_px)).extra_letter_spacing(look.heading_tracking_em * look.heading_px).color(theme::text()));
         });
-        if arrows {
+        if let Some((left, right)) = arrows {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if !left && !right {
+                    // They keep their room, or the page would shift as they come and go.
+                    ui.set_invisible();
+                }
                 let turn = crate::preset::active().app.controls.arrow_hover;
-                res.1 = icon_button_turning(ui, icon::CHEVRON_RIGHT, 18.0, &crate::tr!("ui-scroll-right", title = title), false, turn).clicked();
-                res.0 = icon_button_turning(ui, icon::CHEVRON_LEFT, 18.0, &crate::tr!("ui-scroll-left", title = title), false, turn).clicked();
+                let mut arrow = |on, glyph, name: &str| ui.add_enabled_ui(on, |ui| icon_button_turning(ui, glyph, 18.0, name, false, turn)).inner.clicked();
+                res.1 = arrow(right, icon::CHEVRON_RIGHT, &crate::tr!("ui-scroll-right", title = title));
+                res.0 = arrow(left, icon::CHEVRON_LEFT, &crate::tr!("ui-scroll-left", title = title));
             });
         }
     });
@@ -1876,6 +1927,17 @@ fn shelf_page_target(starts: &[usize], step: f32, from: f32, nudge: i32) -> f32 
     next as f32 * step
 }
 
+fn shelf_arrows_id(id: &str) -> egui::Id {
+    egui::Id::unique(("hscroll", id)).with("arrows")
+}
+
+/// Which arrows (left, right) have somewhere to go on the [`h_scroll`] of this `id`, as last
+/// laid out. At its end there can be `more` to bring in, which the right one asks for.
+pub fn shelf_arrows(ui: &Ui, id: &str, more: bool) -> (bool, bool) {
+    let (left, right) = ui.ctx().data(|d| d.get_temp(shelf_arrows_id(id))).unwrap_or_default();
+    (left, right || (more && left))
+}
+
 /// Horizontal scroller that animates between aligned pages of cards or song columns.
 pub fn h_scroll<R>(ui: &mut Ui, id: &str, nudge: i32, count: usize, item_width: f32, gap: f32, add: impl FnOnce(&mut Ui) -> R) -> (R, bool) {
     let sid = egui::Id::unique(("hscroll", id));
@@ -1886,6 +1948,11 @@ pub fn h_scroll<R>(ui: &mut Ui, id: &str, nudge: i32, count: usize, item_width: 
     let current = egui::scroll_area::State::load(ui.ctx(), state_id).map_or(0.0, |s| s.clamped_offset().x);
     let target_id = sid.with("target");
     let coast_id = sid.with("coast");
+    // Calls off a glide: the arrows' and a flick's.
+    let stop_glide = |ctx: &egui::Context| ctx.data_mut(|d| {
+        d.remove::<f32>(target_id);
+        d.remove::<f32>(coast_id);
+    });
     let viewport_id = sid.with("viewport");
     let viewport = ui.ctx().data(|d| d.get_temp::<f32>(viewport_id)).unwrap_or_else(|| ui.available_width());
     let step = item_width + gap;
@@ -1926,10 +1993,7 @@ pub fn h_scroll<R>(ui: &mut Ui, id: &str, nudge: i32, count: usize, item_width: 
     // or the glide would put it back.
     if cards.is_some_and(|r| ui.rect_contains_pointer(r)) && ui.input(|i| i.smooth_scroll_delta.x != 0.0) {
         (target, coast) = (None, None);
-        ui.ctx().data_mut(|d| {
-            d.remove::<f32>(target_id);
-            d.remove::<f32>(coast_id);
-        });
+        stop_glide(ui.ctx());
     }
     if let Some(rect) = cards {
         let resp = ui.interact(rect, sid.with("drag"), Sense::DRAG);
@@ -1937,10 +2001,7 @@ pub fn h_scroll<R>(ui: &mut Ui, id: &str, nudge: i32, count: usize, item_width: 
             ShelfDrag::Move(dx) => {
                 // A drag takes over from any glide.
                 (target, coast) = (None, None);
-                ui.ctx().data_mut(|d| {
-                    d.remove::<f32>(target_id);
-                    d.remove::<f32>(coast_id);
-                });
+                stop_glide(ui.ctx());
                 held = Some((current - dx).clamp(0.0, max_scroll));
             }
             ShelfDrag::Coast(dx) => {
@@ -1955,13 +2016,10 @@ pub fn h_scroll<R>(ui: &mut Ui, id: &str, nudge: i32, count: usize, item_width: 
     if let Some(x) = held {
         area = area.horizontal_scroll_offset(x);
     } else if let Some(t) = target.or(coast) {
-        let v = ui.ctx().animate_value_with_time(anim_id, t, 0.35 * theme::SPEED);
+        let v = ui.ctx().animate_value_with_time(anim_id, t, 0.35 * theme::speed());
         area = area.horizontal_scroll_offset(v);
         if (v - t).abs() < 0.5 {
-            ui.ctx().data_mut(|d| {
-                d.remove::<f32>(target_id);
-                d.remove::<f32>(coast_id);
-            });
+            stop_glide(ui.ctx());
         }
     }
     let out = area.show(ui, |ui| ui.horizontal_top(|ui| {
@@ -1973,11 +2031,19 @@ pub fn h_scroll<R>(ui: &mut Ui, id: &str, nudge: i32, count: usize, item_width: 
         // Not `inner_rect`'s height: that's all the room left below, over the next shelves.
         d.insert_temp(size_id, vec2(out.inner_rect.width(), out.content_size.y));
     });
+    // For the header's next frame: it's drawn before the shelf.
+    let at = target.unwrap_or(out.state.clamped_offset().x);
+    let goes = |nudge| shelf_page_target(&starts, step, at, nudge);
+    let arrows = (goes(-1) < at - 0.5, goes(1) > at + 0.5);
+    let was = ui.ctx().data_mut(|d| std::mem::replace(d.get_temp_mut_or_default(shelf_arrows_id(id)), arrows));
+    if was != arrows || out.inner_rect.width() != viewport {
+        ui.ctx().request_repaint();
+    }
     (out.inner, reached_end)
 }
 
 /// What a drag on a shelf asks of it this frame: move it by, or coast it on by, points.
-enum ShelfDrag {
+pub(super) enum ShelfDrag {
     Idle,
     Move(f32),
     Coast(f32),
@@ -1987,7 +2053,7 @@ enum ShelfDrag {
 /// started for the rest of it, as phones and browsers do with a scroller inside a page:
 /// the shelf sideways, the page up and down. The mouse's left button drags the shelf
 /// sideways only, once it has gone too far for a click. Let go, and it coasts on.
-fn shelf_drag(ui: &Ui, resp: &Response, state_id: egui::Id) -> ShelfDrag {
+pub(super) fn shelf_drag(ui: &Ui, resp: &Response, state_id: egui::Id) -> ShelfDrag {
     use egui::style::ScrollAnimation;
     /// How far a drag goes before it counts (and before its direction does), points.
     const LOCK: f32 = 6.0;
@@ -2031,7 +2097,7 @@ fn shelf_drag(ui: &Ui, resp: &Response, state_id: egui::Id) -> ShelfDrag {
                 // With the last move, when it came in with the letting go.
                 out = ShelfDrag::Coast(speed + ui.input(|i| i.pointer.delta().x));
             } else if speed.abs() > 1.0 {
-                ui.scroll_with_delta_animation(vec2(0.0, speed), ScrollAnimation::duration(0.6));
+                ui.scroll_with_delta_animation(vec2(0.0, speed), ScrollAnimation::duration(theme::secs(0.6) as f32));
             }
         }
         (moved, axis) = (Vec2::ZERO, None);
@@ -2053,7 +2119,7 @@ pub fn shimmer_band(ui: &Ui, r: Rect, radius: f32, time: f64) {
 /// Paint a remote image into `rect`: the skeleton's shimmer while it downloads (not
 /// egui's spinner), then a quick fade-in. One already loaded just shows.
 pub fn paint_remote(ui: &Ui, url: &str, rect: Rect, radius: f32, uv: Rect, tint: Color32) {
-    const FADE: f64 = 0.22;
+    let fade = 0.22 / f64::from(theme::anim_speed());
     let ctx = ui.ctx();
     let now = ctx.input(|i| i.time);
     let id = egui::Id::unique(("img-fade", url));
@@ -2061,7 +2127,7 @@ pub fn paint_remote(ui: &Ui, url: &str, rect: Rect, radius: f32, uv: Rect, tint:
         Ok(egui::load::TexturePoll::Ready { texture }) => {
             // Fade only what was seen loading; Some(None) = waiting, Some(Some(t)) = fading since t.
             let a = match ctx.data(|d| d.get_temp::<Option<f64>>(id)) {
-                Some(Some(t0)) if now - t0 < FADE => ((now - t0) / FADE) as f32,
+                Some(Some(t0)) if now - t0 < fade => ((now - t0) / fade) as f32,
                 Some(None) => {
                     ctx.data_mut(|d| d.insert_temp(id, Some(now)));
                     0.0
@@ -2205,6 +2271,15 @@ mod shelf_touch_tests {
         above: f32,
         /// The arrows' nudge for the top shelf, next frame.
         nudge: i32,
+        /// How many cards the top shelf has, whether more can come in at its end, and where
+        /// its arrows could go as last drawn.
+        count: usize,
+        more: bool,
+        arrows: (bool, bool),
+        /// How wide its cards are.
+        card: f32,
+        /// The top shelf's key: the page it's on, as `pages` gives it.
+        key: String,
         /// Each shelf's first card, as last drawn, and where it started.
         cards: [Rect; 2],
         start: [Pos2; 2],
@@ -2228,7 +2303,7 @@ mod shelf_touch_tests {
 
     impl Page {
         fn new(touch_screen: bool) -> Self {
-            let mut p = Self { ctx: egui::Context::default(), time: 0.0, above: 100.0, nudge: 0, cards: [Rect::NOTHING; 2], start: [Pos2::ZERO; 2], clicks: 0 };
+            let mut p = Self { ctx: egui::Context::default(), time: 0.0, above: 100.0, nudge: 0, count: 20, more: false, arrows: (false, false), card: 150.0, key: "shelf-a".into(), cards: [Rect::NOTHING; 2], start: [Pos2::ZERO; 2], clicks: 0 };
             if touch_screen {
                 // A touch elsewhere first, so the page knows there's a touch screen.
                 p.frame(vec![touch(TouchPhase::Start, pos2(790.0, 590.0)), touch(TouchPhase::End, pos2(790.0, 590.0))]);
@@ -2242,16 +2317,22 @@ mod shelf_touch_tests {
             let raw = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(800.0, 600.0))), time: Some(self.time), predicted_dt: 1.0 / 60.0, events, ..Default::default() };
             self.time += 1.0 / 60.0;
             let ctx = self.ctx.clone();
-            let (above, nudge) = (self.above, std::mem::take(&mut self.nudge));
+            let key = self.key.clone();
+            let (above, nudge, count, more, width) = (self.above, std::mem::take(&mut self.nudge), self.count, self.more, self.card);
+            let mut arrows = (false, false);
             let mut cards = [Rect::NOTHING; 2];
             let mut clicks = 0;
             let mut out = ctx.run_ui(raw, |ui| {
                 egui::ScrollArea::vertical().id_salt("page").auto_shrink(false).show(ui, |ui| {
                     ui.add_space(above);
                     for (s, card) in cards.iter_mut().enumerate() {
-                        super::h_scroll(ui, ["shelf-a", "shelf-b"][s], if s == 0 { nudge } else { 0 }, 20, 150.0, 10.0, |ui| {
-                            for i in 0..20 {
-                                let (r, resp) = ui.allocate_exact_size(vec2(150.0, 150.0), egui::Sense::click());
+                        let (id, nudge, count, width) = if s == 0 { (key.as_str(), nudge, count, width) } else { ("shelf-b", 0, 20, 150.0) };
+                        if s == 0 {
+                            arrows = super::shelf_arrows(ui, id, more);
+                        }
+                        super::h_scroll(ui, id, nudge, count, width, 10.0, |ui| {
+                            for i in 0..count {
+                                let (r, resp) = ui.allocate_exact_size(vec2(width, 150.0), egui::Sense::click());
                                 if i == 0 {
                                     *card = r;
                                 }
@@ -2265,6 +2346,7 @@ mod shelf_touch_tests {
             });
             out.textures_delta.clear();
             self.cards = cards;
+            self.arrows = arrows;
             self.clicks += clicks;
         }
 
@@ -2427,6 +2509,89 @@ mod shelf_touch_tests {
         // Cards are 160 apart and four or five fit, so the next page is past `from`, within 800.
         assert!(to > from && to - from <= 800.0 && to % 160.0 == 0.0, "from {from} to {to}");
     }
+
+    #[test]
+    fn arrows_go_only_where_the_shelf_has_more_to_show() {
+        let mut p = Page::new(false);
+        assert_eq!(p.arrows, (false, true), "at the start");
+        p.nudge = 1;
+        p.idle(90);
+        assert_eq!(p.arrows, (true, true), "in the middle");
+        for _ in 0..5 {
+            p.nudge = 1;
+            p.idle(90);
+        }
+        assert_eq!(p.arrows, (true, false), "at the end");
+        // More can come in there.
+        p.more = true;
+        p.idle(1);
+        assert_eq!(p.arrows, (true, true), "at the end, with more to come");
+        // Fewer cards than fit, even left scrolled, and even with more to come.
+        p.count = 3;
+        p.idle(3);
+        assert_eq!(p.arrows, (false, false), "all on show");
+    }
+
+    #[test]
+    fn arrows_know_the_end_as_soon_as_a_click_sends_the_shelf_there() {
+        let mut p = Page::new(false);
+        p.count = 6;
+        p.idle(3);
+        assert_eq!(p.arrows, (false, true));
+        p.nudge = 1;
+        p.idle(2);
+        assert_eq!(p.arrows, (true, false), "gliding to the end");
+        p.idle(90);
+        assert_eq!(p.arrows, (true, false), "there");
+    }
+
+    #[test]
+    fn a_card_wider_than_the_page_dragged_aside_can_be_sent_back() {
+        let mut p = Page::new(false);
+        (p.count, p.card) = (1, 1000.0);
+        p.idle(3);
+        assert_eq!(p.arrows, (false, false));
+        p.drag(LEFT, p.on(0, 600.0), vec2(-150.0, 0.0), 4);
+        p.idle(90);
+        assert_eq!(p.arrows, (true, false), "dragged aside");
+        p.nudge = -1;
+        p.idle(90);
+        assert_eq!(p.arrows, (false, false), "sent back");
+    }
+
+    #[test]
+    fn a_shelf_on_another_page_starts_at_its_beginning() {
+        let mut p = Page::new(false);
+        p.nudge = 1;
+        p.idle(90);
+        // Let go while it coasts, then open the next artist.
+        p.drag(LEFT, p.on(0, 600.0), vec2(-300.0, 0.0), 3);
+        let scrolled = p.seen().shelf[0];
+        assert!(scrolled > 0.0);
+        p.key = "shelf-a-next".into();
+        p.idle(90);
+        assert_eq!((p.seen().shelf[0], p.arrows), (0.0, (false, true)), "the next page's shelf");
+        // It scrolls on its own, by arrow and by drag.
+        p.nudge = 1;
+        p.idle(90);
+        assert_eq!(p.arrows, (true, true));
+        p.drag(LEFT, p.on(0, 600.0), vec2(-200.0, 0.0), 4);
+        p.idle(90);
+        assert!(p.seen().shelf[0] > 0.0);
+    }
+
+    #[test]
+    fn arrows_follow_a_drag() {
+        let mut p = Page::new(false);
+        p.drag(LEFT, p.on(0, 600.0), vec2(-200.0, 0.0), 4);
+        p.idle(90);
+        assert_eq!(p.arrows, (true, true));
+        for _ in 0..3 {
+            p.drag(LEFT, p.on(0, 100.0), vec2(600.0, 0.0), 4);
+            p.idle(90);
+        }
+        assert_eq!(p.arrows, (false, true));
+    }
 }
 
 #[cfg(test)]
@@ -2504,6 +2669,21 @@ mod time_tests {
             assert!(super::is_elided(&wrap_cut, long));
             let wrap_fit = super::galley_wrapped(ui, "Short text", font, egui::Color32::WHITE, 200.0, 2);
             assert!(!super::is_elided(&wrap_fit, "Short text"));
+        });
+        out.textures_delta.clear();
+    }
+
+    /// Up next in Arabic, too long for its room beside the window buttons, keeps its start.
+    #[test]
+    fn right_to_left_text_is_cut_at_its_end() {
+        let ctx = egui::Context::default();
+        ctx.run_ui(egui::RawInput::default(), |_| {}).textures_delta.clear();
+        let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let font = egui::FontId::proportional(20.0);
+            let text = "التالي في الانتظار";
+            let full = ui.fonts_mut(|f| f.layout_job(crate::bidi::job(text, font.clone(), egui::Color32::WHITE)).size().x);
+            let cut = super::rtl_fit(ui, text, &font, full / 2.0);
+            assert!(cut.starts_with("التالي") && cut.ends_with('…'), "{cut}");
         });
         out.textures_delta.clear();
     }
